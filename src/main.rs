@@ -2156,7 +2156,7 @@ impl App {
                 // closest matches first; show a window of rows around the cursor
                 const ROWS: usize = 14;
                 let start = lp.cur.saturating_sub(ROWS / 2).min(lp.items.len().saturating_sub(ROWS));
-                modal(ctx, "link to claude's card", screen, Vec2::new(820.0, 150.0 + ROWS as f32 * 26.0), |ui| {
+                modal(ctx, "link to claude's card", screen, Vec2::new(820.0, 130.0 + lp.items.len().min(ROWS) as f32 * 28.0), |ui| {
                     ui.add(egui::Label::new(RichText::new(&lp.title).color(FG_BRIGHT).size(14.0)).truncate());
                     ui.add_space(8.0);
                     ui.spacing_mut().item_spacing.y = 0.0;
@@ -2233,7 +2233,8 @@ impl App {
                 let cur = *cur;
                 let Some(Ok(d)) = &self.data else { return };
                 let name = |id: &str| d.kb.name(id);
-                modal(ctx, "commit log", screen, Vec2::new(900.0, (screen.height() - 120.0).min(600.0)), |ui| {
+                let h = if entries.is_empty() { 150.0 } else { (screen.height() - 120.0).min(140.0 + entries.len() as f32 * 48.0).min(600.0) };
+                modal(ctx, "commit log", screen, Vec2::new(900.0, h), |ui| {
                     if entries.is_empty() {
                         ui.label(RichText::new("no commits yet").color(COMMENT));
                     }

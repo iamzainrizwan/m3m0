@@ -366,10 +366,11 @@ impl Pdfs {
                 if !label.starts_with(typed.as_str()) {
                     continue;
                 }
-                let at = r.left_top() - egui::vec2(2.0, 2.0);
-                let g = p.text(at, egui::Align2::RIGHT_TOP, &label, egui::FontId::monospace(12.0), crate::theme::BG);
+                // badge sits just left of the link, so the link text stays readable
+                let at = r.left_center() - egui::vec2(5.0, 0.0);
+                let g = p.text(at, egui::Align2::RIGHT_CENTER, &label, egui::FontId::monospace(12.0), crate::theme::BG);
                 p.rect_filled(g.expand(2.0), 0.0, crate::theme::RED_BRIGHT);
-                p.text(at, egui::Align2::RIGHT_TOP, &label, egui::FontId::monospace(12.0), crate::theme::BG);
+                p.text(at, egui::Align2::RIGHT_CENTER, &label, egui::FontId::monospace(12.0), crate::theme::BG);
             }
         }
         // mouse-wheel scrolling feeds back so keys continue from there

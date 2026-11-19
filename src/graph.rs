@@ -418,9 +418,10 @@ impl Graph {
             }
             let size = (hi - lo).max(Vec2::splat(80.0));
             let target = (lo + hi) / 2.0;
-            self.center += (target - self.center) * 0.25;
-            let s = ((rect.width() - 120.0) / size.x).min((rect.height() - 120.0) / size.y).clamp(0.02, 3.0);
-            self.scale += (s - self.scale) * 0.25;
+            // margin leaves room for labels and the info card; fast enough to keep up while the layout spreads
+            self.center += (target - self.center) * 0.35;
+            let s = ((rect.width() - 160.0) / size.x).min((rect.height() - 200.0) / size.y).clamp(0.02, 3.0);
+            self.scale += (s - self.scale) * 0.35;
         } else if let (true, Some(s)) = (self.follow, self.sel) {
             self.center += (self.nodes[s].pos - self.center) * 0.2;
         }
