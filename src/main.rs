@@ -3,6 +3,8 @@ mod bridge;
 mod config;
 mod icon;
 mod kb;
+mod math;
+mod render;
 mod rich;
 mod theme;
 
@@ -113,6 +115,9 @@ struct App {
     msg: Option<String>,
     reloaded: bool,
     replayed: bool,
+    math: math::Math,
+    /// vim jumplist for gd / ctrl-o: (page, cursor)
+    jumps: Vec<(String, usize)>,
 }
 
 fn load(db: Option<PathBuf>) -> Result<Loaded, String> {
@@ -216,6 +221,8 @@ impl App {
             msg: None,
             reloaded: false,
             replayed: false,
+            math: math::Math::default(),
+            jumps: vec![],
         }
     }
 
@@ -339,6 +346,17 @@ impl App {
 
         match (prefix.as_str(), k) {
             ("g", K::Ch('g')) => self.jump(0, trows.len(), nrows.len()),
+            ("g", K::Ch('d')) if self.focus == Focus::Notes => {
+                // go to the [[ref]] on this line (the nth with a count)
+                if let Some((id, _)) = nrows.get(self.note_cur) {
+                    let l = d.kb.line_of(id);
+                    let refs: Vec<String> = l.front.iter().chain(&l.back).filter_map(|s| if let rich::Span::Ref { id, .. } = s { Some(id.clone()) } else { None }).collect();
+                    match refs.get(n.saturating_sub(1)).or(refs.first()) {
+                        Some(r) => self.goto(d, r),
+                        None => self.msg = Some("no [[ref]] on this line".into()),
+                    }
+                }
+            }
             ("z", K::Ch(c)) => self.fold(d, &nrows, c),
             (_, K::Ch('g')) => self.pending = format!("{digits}g"),
             (_, K::Ch('z')) => self.pending.push('z'),
@@ -351,6 +369,14 @@ impl App {
             (_, K::Ctrl('b')) => {
                 self.cfg.sidebar_open = !self.cfg.sidebar_open;
                 if !self.cfg.sidebar_open {
+                    self.focus = Focus::Notes;
+                }
+            }
+            (_, K::Ctrl('o')) => {
+                if let Some((p, c)) = self.jumps.pop() {
+                    self.week = Some(p);
+                    self.note_cur = c;
+                    self.scroll_notes = true;
                     self.focus = Focus::Notes;
                 }
             }
@@ -838,6 +864,7 @@ impl App {
                 };
                 let rows = note_rows(&d.kb, &w, &self.folded);
                 self.note_cur = self.note_cur.min(rows.len().saturating_sub(1));
+                let mut clicked_ref: Option<String> = None;
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     let width = (ui.available_width() - 12.0).min(MEASURE);
                     let pad = ((ui.available_width() - width) / 2.0).max(0.0);
@@ -856,12 +883,14 @@ impl App {
                                 if heading.is_some() && i > 0 {
                                     ui.add_space(8.0);
                                 }
+                                let math = &mut self.math;
+                                let mut refs = vec![];
                                 let resp = row(ui, ("n", id), sel, focused, *depth as f32 * 22.0, |ui| {
-                                    let line = d.kb.line(id);
+                                    let line = d.kb.line_of(id);
                                     match heading {
                                         Some(h) => {
-                                            let t = RichText::new(line).size(HEADINGS[h.min(4) as usize]).color(FG_BRIGHT).family(bold());
-                                            ui.add(egui::Label::new(t).wrap().selectable(false));
+                                            let st = render::Style { size: HEADINGS[h.min(4) as usize], color: FG_BRIGHT, bold: true };
+                                            refs = render::line(ui, &d.kb, math, &line, &st);
                                             if folded {
                                                 ui.label(RichText::new(" …").color(RED).size(NOTE_TEXT));
                                             }
@@ -873,11 +902,18 @@ impl App {
                                                 _ => ("•", COMMENT),
                                             };
                                             ui.add(egui::Label::new(RichText::new(b).color(c).size(NOTE_TEXT - 2.0)).selectable(false));
-                                            ui.add_space(4.0);
-                                            ui.add(egui::Label::new(RichText::new(line).size(NOTE_TEXT)).wrap().selectable(false));
+                                            ui.add_space(6.0);
+                                            let st = render::Style { size: NOTE_TEXT, color: FG, bold: false };
+                                            refs = render::line(ui, &d.kb, math, &line, &st);
                                         }
                                     }
                                 });
+                                if resp.clicked() {
+                                    let at = resp.interact_pointer_pos();
+                                    if let Some((_, rid)) = refs.iter().find(|(r, _)| at.is_some_and(|p| r.contains(p))) {
+                                        clicked_ref = Some(rid.clone());
+                                    }
+                                }
                                 if sel && self.scroll_notes {
                                     resp.scroll_to_me(None);
                                 }
@@ -896,7 +932,43 @@ impl App {
                     });
                 });
                 self.scroll_notes = false;
+                if let Some(r) = clicked_ref {
+                    self.goto(d, &r);
+                }
             });
+    }
+
+    /// Open the page holding rem `id` (its week, else its parent) with the cursor on it.
+    fn goto(&mut self, d: &Loaded, id: &str) {
+        if let Some(w) = &self.week {
+            self.jumps.push((w.clone(), self.note_cur));
+        }
+        let mut chain = vec![];
+        let mut cur = id.to_owned();
+        let mut page = None;
+        while let Some(p) = d.kb.q.get(&cur).and_then(|x| x.get("parent")).and_then(|p| p.as_str()).map(str::to_owned) {
+            if d.mods.contains(&p) {
+                page = Some(cur.clone());
+                break;
+            }
+            chain.push(p.clone());
+            cur = p;
+        }
+        // not under a module week: show its parent (or itself if top-level)
+        let page = page.unwrap_or_else(|| d.kb.q.get(id).and_then(|x| x.get("parent")).and_then(|p| p.as_str()).map(str::to_owned).unwrap_or(id.to_owned()));
+        for c in &chain {
+            self.folded.remove(c);
+        }
+        self.week = Some(page.clone());
+        let rows = note_rows(&d.kb, &page, &self.folded);
+        self.note_cur = rows.iter().position(|r| r.0 == id).unwrap_or(0);
+        self.scroll_notes = true;
+        self.focus = Focus::Notes;
+        if let Some(m) = d.kb.module_of(&page).or_else(|| d.mods.iter().find(|m| **m == page).cloned()) {
+            self.open_mods.insert(m);
+        }
+        self.tree_cur = tree_rows(d, &self.open_mods).iter().position(|r| r.0 == page).unwrap_or(self.tree_cur);
+        self.scroll_tree = true;
     }
 
     fn overlays(&mut self, ctx: &egui::Context) {
@@ -904,7 +976,7 @@ impl App {
         match &self.overlay {
             Overlay::Help => {
                 let groups: &[(&str, &[(&str, &str)])] = &[
-                    ("move", &[("j / k", "down / up (5j works)"), ("gg / G", "top / bottom"), ("ctrl-d / ctrl-u", "half page"), ("h / l", "out / in (tree: collapse / open)"), ("ctrl-j / ctrl-k", "next / previous week")]),
+                    ("move", &[("j / k", "down / up (5j works)"), ("gg / G", "top / bottom"), ("ctrl-d / ctrl-u", "half page"), ("h / l", "out / in (tree: collapse / open)"), ("ctrl-j / ctrl-k", "next / previous week"), ("gd / ctrl-o", "go to [[ref]] / jump back")]),
                     ("panes", &[("tab", "switch tree / notes"), ("ctrl-h / ctrl-l", "focus tree / notes"), ("ctrl-b", "toggle sidebar"), ("< / >", "narrow / widen sidebar (tree)")]),
                     ("fold", &[("za / enter", "toggle"), ("zc / zo", "close / open"), ("zM / zR", "fold all / unfold all")]),
                     ("app", &[(":", "command  (:q :db :reload :zoom 130)"), ("ctrl +/- / ctrl 0", "zoom (saved)"), ("?", "this help")]),
