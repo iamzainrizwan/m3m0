@@ -221,7 +221,10 @@ impl Kb {
         let front = parse_rt(d.get("key"));
         let back = parse_rt(d.get("value"));
         let has_value = d.get("value").is_some_and(|v| !v.is_null());
-        let kind = if d.pointer("/apu/cd/v").and_then(Value::as_bool) == Some(true) {
+        let staged = d.get("m3m0").and_then(Value::as_str).map(crate::edit::kind_from);
+        let kind = if let Some(k) = staged {
+            k
+        } else if d.pointer("/apu/cd/v").and_then(Value::as_bool) == Some(true) {
             Kind::Code
         } else if let Some(h) = self.heading(i) {
             Kind::Heading(h.max(1))

@@ -1,6 +1,8 @@
 mod boot;
 mod bridge;
 mod config;
+mod edit;
+mod editor;
 mod icon;
 mod kb;
 mod math;
@@ -100,6 +102,8 @@ enum Overlay {
 enum K {
     Ch(char),
     Ctrl(char),
+    Alt(char),
+    ShiftTab,
     Enter,
     Esc,
     Tab,
@@ -132,6 +136,10 @@ struct App {
     math: math::Math,
     /// vim jumplist for gd / ctrl-o: (page, cursor)
     jumps: Vec<(String, usize)>,
+    changes: edit::Changes,
+    editing: Option<editor::Editing>,
+    /// cursor position to set in the edit box next frame (after autocomplete)
+    pending_cursor: Option<usize>,
 }
 
 fn load(db: Option<PathBuf>) -> Result<Loaded, String> {
@@ -194,7 +202,8 @@ fn note_rows(kb: &Kb, week: &str, folded: &HashSet<String>) -> Vec<(String, usiz
     fn go(kb: &Kb, id: &str, depth: usize, folded: &HashSet<String>, out: &mut Vec<(String, usize)>) {
         for k in kb.children(Some(id)) {
             let kids = kb.children(Some(k));
-            if kb.line(k).trim().is_empty() && kids.is_empty() {
+            // hide blank spacer rems, but never ones made in this session (being typed)
+            if kids.is_empty() && !k.starts_with("tmp-") && kb.line(k).trim().is_empty() {
                 continue;
             }
             out.push((k.clone(), depth));
@@ -237,6 +246,9 @@ impl App {
             replayed: false,
             math: math::Math::default(),
             jumps: vec![],
+            changes: edit::Changes::default(),
+            editing: None,
+            pending_cursor: None,
         }
     }
 
@@ -281,12 +293,13 @@ impl App {
         ctx.input_mut(|i| {
             for e in &i.events {
                 match e {
-                    egui::Event::Text(t) => out.extend(t.chars().map(K::Ch)),
+                    egui::Event::Text(t) if !i.modifiers.alt => out.extend(t.chars().map(K::Ch)),
                     egui::Event::Key { key, pressed: true, modifiers, .. } => {
-                        if modifiers.ctrl && !modifiers.shift {
+                        if (modifiers.ctrl || modifiers.alt) && !modifiers.shift {
                             let n = key.name();
                             if n.len() == 1 {
-                                out.push(K::Ctrl(n.to_ascii_lowercase().chars().next().unwrap()));
+                                let c = n.to_ascii_lowercase().chars().next().unwrap();
+                                out.push(if modifiers.ctrl { K::Ctrl(c) } else { K::Alt(c) });
                             }
                             continue;
                         }
@@ -315,10 +328,14 @@ impl App {
         if std::env::var("M3M0_DEBUG").is_ok() {
             eprintln!("key {k:?}");
         }
-        let taken = self.data.take();
+        let mut taken = self.data.take();
         self.reloaded = false;
-        if let Some(Ok(d)) = &taken {
-            self.handle_loaded(ctx, d, k);
+        if let Some(Ok(d)) = &mut taken {
+            if self.editing.is_some() {
+                self.handle_insert(d, k);
+            } else {
+                self.handle_loaded(ctx, d, k);
+            }
         } else {
             self.handle_loading(ctx, k);
         }
@@ -337,7 +354,7 @@ impl App {
         }
     }
 
-    fn handle_loaded(&mut self, ctx: &egui::Context, d: &Loaded, k: K) {
+    fn handle_loaded(&mut self, ctx: &egui::Context, d: &mut Loaded, k: K) {
         if !matches!(self.overlay, Overlay::None) {
             self.handle_overlay(ctx, k);
             return;
@@ -358,6 +375,9 @@ impl App {
         let trows = tree_rows(d, &self.open_mods);
         let nrows = self.week.as_ref().map(|w| note_rows(&d.kb, w, &self.folded)).unwrap_or_default();
 
+        if self.edit_key(d, &prefix, k, n, &nrows) {
+            return;
+        }
         match (prefix.as_str(), k) {
             ("g", K::Ch('g')) => self.jump(0, trows.len(), nrows.len()),
             ("g", K::Ch('d')) if self.focus == Focus::Notes => {
@@ -657,7 +677,7 @@ impl eframe::App for App {
         }
 
         if self.boot.finished {
-            let mut ks = self.keys(ctx);
+            let mut ks = if self.editing.is_some() { self.insert_keys(ctx) } else { self.keys(ctx) };
             if std::env::var("M3M0_SHOTS").is_ok() {
                 ks.clear(); // previews: only replayed keys
             }
@@ -670,6 +690,7 @@ impl eframe::App for App {
                         ks.push(match c {
                             '~' => K::Ctrl(it.next().unwrap_or(' ')),
                             '\n' => K::Enter,
+                            '\u{1b}' => K::Esc,
                             c => K::Ch(c),
                         });
                     }
@@ -778,16 +799,21 @@ impl App {
                 p.rect_filled(Rect::from_min_size(Pos2::new(t.right() + 1.0, r.top() + 4.0), Vec2::new(8.0, r.height() - 8.0)), 0.0, RED_CURSOR);
                 return;
             }
-            let (mode, col) = match self.focus {
-                Focus::Tree => (" TREE ", RED),
-                Focus::Notes => (" NOTES ", RED),
+            let (mode, col) = match (self.editing.is_some(), self.focus) {
+                (true, _) => (" INSERT ", RED_BRIGHT),
+                (_, Focus::Tree) => (" TREE ", RED),
+                (_, Focus::Notes) => (" NOTES ", RED),
             };
             let pill = p.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, mode, f.clone(), BG);
             p.rect_filled(pill.expand2(Vec2::new(2.0, 3.0)), 0.0, col);
             p.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, mode, f.clone(), BG);
             let left = match (&self.msg, &self.data) {
                 (Some(m), _) => m.clone(),
-                (None, Some(Ok(d))) => format!("{} rems · {} cards · bridge offline · read-only", d.kb.q.len(), d.kb.cards),
+                (None, Some(Ok(d))) => {
+                    let staged = self.changes.ops.len();
+                    let st = if staged > 0 { format!("{staged} staged (:w to commit, u to undo)") } else { "nothing staged".into() };
+                    format!("{} rems · {} cards · {st}", d.kb.q.len(), d.kb.cards)
+                }
                 (None, Some(Err(_))) => "load failed".into(),
                 (None, None) => "loading…".into(),
             };
@@ -879,6 +905,8 @@ impl App {
                 let rows = note_rows(&d.kb, &w, &self.folded);
                 self.note_cur = self.note_cur.min(rows.len().saturating_sub(1));
                 let mut clicked_ref: Option<String> = None;
+                let mut editing = self.editing.take();
+                let mut pending_cursor = self.pending_cursor.take();
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     let width = (ui.available_width() - 12.0).min(MEASURE);
                     let pad = ((ui.available_width() - width) / 2.0).max(0.0);
@@ -900,6 +928,11 @@ impl App {
                                 let math = &mut self.math;
                                 let mut refs = vec![];
                                 let resp = row(ui, ("n", id), sel, focused, *depth as f32 * 22.0, |ui| {
+                                    if let Some(e) = editing.as_mut().filter(|e| &e.id == id) {
+                                        ui.label(RichText::new("\u{f040} ").size(NOTE_TEXT - 2.0).color(RED));
+                                        editor::edit_ui(ui, e, &d.kb, &mut pending_cursor);
+                                        return;
+                                    }
                                     let line = d.kb.line_of(id);
                                     match heading {
                                         Some(h) => {
@@ -944,6 +977,8 @@ impl App {
                     });
                 });
                 self.scroll_notes = false;
+                self.editing = editing;
+                self.pending_cursor = pending_cursor;
                 if let Some(r) = clicked_ref {
                     self.goto(d, &r);
                 }
