@@ -7,6 +7,7 @@ mod editor;
 mod icon;
 mod kb;
 mod math;
+mod pdf;
 mod render;
 mod rich;
 mod theme;
@@ -93,6 +94,7 @@ struct Loaded {
 enum Focus {
     Tree,
     Notes,
+    Pdf,
 }
 
 enum Overlay {
@@ -149,6 +151,7 @@ struct App {
     pending_cursor: Option<usize>,
     bridge: bridge::Bridge,
     committing: Option<mpsc::Receiver<(commit::Outcome, Vec<edit::Op>)>>,
+    pdfs: pdf::Pdfs,
 }
 
 fn load(db: Option<PathBuf>) -> Result<Loaded, String> {
@@ -236,6 +239,8 @@ impl App {
         let rx = Self::spawn_load(&cc.egui_ctx, kb::resolve_db(cfg.db.as_deref()));
         let rc = cc.egui_ctx.clone();
         let bridge = bridge::Bridge::start(move || rc.request_repaint());
+        let rc2 = cc.egui_ctx.clone();
+        let pdfs = pdf::Pdfs::new(move || rc2.request_repaint());
         App {
             boot: boot::Boot::new(),
             rx,
@@ -262,6 +267,7 @@ impl App {
             pending_cursor: None,
             bridge,
             committing: None,
+            pdfs,
         }
     }
 
@@ -388,6 +394,16 @@ impl App {
         let trows = tree_rows(d, &self.open_mods);
         let nrows = self.week.as_ref().map(|w| note_rows(&d.kb, w, &self.folded)).unwrap_or_default();
 
+        if let K::Ctrl('p') = k {
+            self.cfg.pdf_open = !self.cfg.pdf_open;
+            self.focus = if self.cfg.pdf_open { Focus::Pdf } else { Focus::Notes };
+            return;
+        }
+        if self.focus == Focus::Pdf && !matches!(k, K::Tab | K::Ch(':') | K::Ch('?') | K::Ctrl(_)) {
+            if self.pdf_key(&prefix, k, n) {
+                return;
+            }
+        }
         if self.edit_key(d, &prefix, k, n, &nrows) {
             return;
         }
@@ -448,6 +464,7 @@ impl App {
                         self.scroll_tree = true;
                     }
                 }
+                Focus::Pdf => {}
                 Focus::Notes => {
                     if let Some((id, depth)) = nrows.get(self.note_cur).cloned() {
                         if self.folded.remove(&id) {
@@ -473,6 +490,7 @@ impl App {
                         self.scroll_tree = true;
                     }
                 }
+                Focus::Pdf => self.focus = Focus::Notes,
                 Focus::Notes => match nrows.get(self.note_cur) {
                     Some((_, 0)) | None => {
                         if self.cfg.sidebar_open {
@@ -495,15 +513,59 @@ impl App {
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Tree => Focus::Notes,
-            Focus::Notes if self.cfg.sidebar_open => Focus::Tree,
+            Focus::Notes if self.cfg.pdf_open => Focus::Pdf,
+            Focus::Notes | Focus::Pdf if self.cfg.sidebar_open => Focus::Tree,
+            Focus::Pdf => Focus::Notes,
             f => f,
         };
+    }
+
+    /// Keys while the PDF panel has focus. Returns true if handled.
+    fn pdf_key(&mut self, prefix: &str, k: K, n: usize) -> bool {
+        let line = 60.0 * n as f32;
+        let half = 400.0 * n as f32;
+        let heights = self.pdfs.page_heights(self.cfg.pdf_w * self.pdfs.zoom);
+        let page_top = |i: usize| heights.iter().take(i).map(|h| h + 10.0).sum::<f32>();
+        let cur_page = {
+            let mut acc = 0.0;
+            let mut pg = 0;
+            for (i, h) in heights.iter().enumerate() {
+                if acc + h / 2.0 > self.pdfs.scroll {
+                    pg = i;
+                    break;
+                }
+                acc += h + 10.0;
+                pg = i;
+            }
+            pg
+        };
+        match (prefix, k) {
+            ("g", K::Ch('g')) => self.pdfs.scroll = 0.0,
+            (_, K::Ch('g')) => self.pending.push('g'),
+            (_, K::Ch('G')) => self.pdfs.scroll = f32::MAX,
+            (_, K::Ch('j') | K::Down) => self.pdfs.scroll += line,
+            (_, K::Ch('k') | K::Up) => self.pdfs.scroll = (self.pdfs.scroll - line).max(0.0),
+            (_, K::Ctrl('d')) => self.pdfs.scroll += half,
+            (_, K::Ctrl('u')) => self.pdfs.scroll = (self.pdfs.scroll - half).max(0.0),
+            (_, K::Ch('J')) => self.pdfs.scroll = page_top((cur_page + n).min(heights.len().saturating_sub(1))),
+            (_, K::Ch('K')) => self.pdfs.scroll = page_top(cur_page.saturating_sub(n)),
+            (_, K::Ch(']')) => self.pdfs.step(n as isize),
+            (_, K::Ch('[')) => self.pdfs.step(-(n as isize)),
+            (_, K::Ch('+')) => self.pdfs.zoom = (self.pdfs.zoom * 1.15).min(4.0),
+            (_, K::Ch('-')) => self.pdfs.zoom = (self.pdfs.zoom / 1.15).max(0.4),
+            (_, K::Ch('=')) => self.pdfs.zoom = 1.0,
+            (_, K::Ch('h') | K::Left) => self.focus = Focus::Notes,
+            (_, K::Ch('<')) => self.cfg.pdf_w = (self.cfg.pdf_w + 40.0 * n as f32).min(1400.0),
+            (_, K::Ch('>')) => self.cfg.pdf_w = (self.cfg.pdf_w - 40.0 * n as f32).max(280.0),
+            _ => return false,
+        }
+        true
     }
 
     fn mv(&mut self, by: isize, tn: usize, nn: usize) {
         let (cur, len, flag) = match self.focus {
             Focus::Tree => (&mut self.tree_cur, tn, &mut self.scroll_tree),
-            Focus::Notes => (&mut self.note_cur, nn, &mut self.scroll_notes),
+            Focus::Notes | Focus::Pdf => (&mut self.note_cur, nn, &mut self.scroll_notes),
         };
         if len > 0 {
             *cur = (*cur as isize + by).clamp(0, len as isize - 1) as usize;
@@ -514,7 +576,7 @@ impl App {
     fn jump(&mut self, to: usize, tn: usize, nn: usize) {
         match self.focus {
             Focus::Tree => self.tree_cur = to.min(tn.saturating_sub(1)),
-            Focus::Notes => self.note_cur = to.min(nn.saturating_sub(1)),
+            Focus::Notes | Focus::Pdf => self.note_cur = to.min(nn.saturating_sub(1)),
         }
         self.scroll_tree = true;
         self.scroll_notes = true;
@@ -874,6 +936,7 @@ impl eframe::App for App {
         };
 
         self.sidebar(ctx, data);
+        self.pdf_panel(ctx, data);
         self.notes(ctx, data);
         self.boot.show(ctx, Some(&data.log), BAR_LOGO);
         self.data = taken;
@@ -950,6 +1013,7 @@ impl App {
                 (true, _) => (" INSERT ", RED_BRIGHT),
                 (_, Focus::Tree) => (" TREE ", RED),
                 (_, Focus::Notes) => (" NOTES ", RED),
+                (_, Focus::Pdf) => (" PDF ", RED),
             };
             let pill = p.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, mode, f.clone(), BG);
             p.rect_filled(pill.expand2(Vec2::new(2.0, 3.0)), 0.0, col);
@@ -1041,6 +1105,51 @@ impl App {
                     if resp.dragged() {
                         if let Some(x) = ctx.pointer_interact_pos() {
                             self.cfg.sidebar_w = (x.x - pr.left()).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    fn pdf_panel(&mut self, ctx: &egui::Context, d: &Loaded) {
+        // follow the open week: module rem name -> uni-git folder, "Week N" -> week-NN
+        if let Some(w) = &self.week {
+            if let Some(m) = d.kb.q.get(w).and_then(|x| x.get("parent")).and_then(|p| p.as_str()).filter(|p| d.mods.iter().any(|m| m == p)) {
+                self.pdfs.set_week(&d.kb.name(m), &d.kb.name(w));
+            }
+        }
+        let focused = self.focus == Focus::Pdf;
+        let panel = egui::SidePanel::right("pdf")
+            .resizable(false)
+            .exact_width(self.cfg.pdf_w)
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin { left: 8, right: 8, top: 8, bottom: 8 }))
+            .show_animated(ctx, self.cfg.pdf_open, |ui| {
+                // file switcher: [ / ] in the panel
+                let n = self.pdfs.files.len();
+                ui.horizontal(|ui| {
+                    let name = self.pdfs.files.get(self.pdfs.cur).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "no pdfs".into());
+                    let scope = if self.pdfs.cur < self.pdfs.n_week { "week" } else { "module" };
+                    ui.label(RichText::new(format!("{} ", if focused { "\u{f15c}" } else { "\u{f1c1}" })).color(if focused { RED_BRIGHT } else { FG_DIM }));
+                    ui.add(egui::Label::new(RichText::new(name).color(FG_BRIGHT).size(13.0)).truncate());
+                    ui.label(RichText::new(format!("  {}/{} · {scope}", (self.pdfs.cur + 1).min(n), n)).color(COMMENT).size(12.0));
+                });
+                ui.add_space(4.0);
+                self.pdfs.show(ui);
+            });
+        if let Some(ir) = panel {
+            let pr = ir.response.rect;
+            if self.cfg.pdf_open && (pr.width() - self.cfg.pdf_w).abs() < 1.0 {
+                let h = Rect::from_min_max(Pos2::new(pr.left() - 3.0, pr.top()), Pos2::new(pr.left() + 3.0, pr.bottom()));
+                egui::Area::new(egui::Id::new("pdf-handle")).order(egui::Order::Foreground).fixed_pos(h.min).show(ctx, |ui| {
+                    let (rect, resp) = ui.allocate_exact_size(h.size(), Sense::drag());
+                    if resp.hovered() || resp.dragged() {
+                        ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
+                        ui.painter().rect_filled(Rect::from_center_size(rect.center(), Vec2::new(2.0, rect.height())), 0.0, RED);
+                    }
+                    if resp.dragged() {
+                        if let Some(x) = ctx.pointer_interact_pos() {
+                            self.cfg.pdf_w = (pr.right() - x.x).clamp(280.0, 1400.0);
                         }
                     }
                 });
@@ -1181,11 +1290,13 @@ impl App {
             Overlay::Help => {
                 let groups: &[(&str, &[(&str, &str)])] = &[
                     ("move", &[("j / k", "down / up (5j works)"), ("gg / G", "top / bottom"), ("ctrl-d / ctrl-u", "half page"), ("h / l", "out / in (tree: collapse / open)"), ("ctrl-j / ctrl-k", "next / previous week"), ("gd / ctrl-o", "go to [[ref]] / jump back")]),
-                    ("panes", &[("tab", "switch tree / notes"), ("ctrl-h / ctrl-l", "focus tree / notes"), ("ctrl-b", "toggle sidebar"), ("< / >", "narrow / widen sidebar (tree)")]),
+                    ("panes", &[("tab", "switch tree / notes"), ("ctrl-h / ctrl-l", "focus tree / notes"), ("ctrl-b", "toggle sidebar"), ("ctrl-p", "toggle week PDFs"), ("< / >", "narrow / widen sidebar (tree)")]),
+                    ("pdf panel", &[("j / k  ctrl-d / u", "scroll"), ("J / K", "next / previous page"), ("[ / ]", "previous / next file"), ("+ / - / =", "zoom / reset"), ("< / >", "widen / narrow panel")]),
+                    ("edit", &[("i a / I A", "edit bullet (start / end)"), ("o / O", "new bullet below / above"), ("enter / tab / s-tab", "(insert) new bullet / indent / outdent"), ("dd", "delete bullet"), (">> / <<", "indent / outdent"), ("alt-j / alt-k", "move bullet down / up"), ("u / ctrl-r", "undo / redo"), (":w  :w!  :log", "review + commit / commit / history")]),
                     ("fold", &[("za / enter", "toggle"), ("zc / zo", "close / open"), ("zM / zR", "fold all / unfold all")]),
                     ("app", &[(":", "command  (:q :db :reload :zoom 130)"), ("ctrl +/- / ctrl 0", "zoom (saved)"), ("?", "this help")]),
                 ];
-                modal(ctx, "keys", screen, Vec2::new(560.0, 480.0), |ui| {
+                modal(ctx, "keys", screen, Vec2::new(620.0, screen.height() - 80.0), |ui| {
                     for (g, ks) in groups {
                         ui.label(RichText::new(*g).color(RED).family(bold()).size(13.0));
                         ui.add_space(2.0);

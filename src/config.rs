@@ -10,13 +10,15 @@ pub struct Config {
     pub zoom: Option<f32>,
     pub sidebar_w: f32,
     pub sidebar_open: bool,
+    pub pdf_open: bool,
+    pub pdf_w: f32,
     /// None = auto-detect (largest ~/remnote/*/remnote.db).
     pub db: Option<PathBuf>,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { zoom: None, sidebar_w: 240.0, sidebar_open: true, db: None }
+        Config { zoom: None, sidebar_w: 240.0, sidebar_open: true, pdf_open: false, pdf_w: 640.0, db: None }
     }
 }
 
