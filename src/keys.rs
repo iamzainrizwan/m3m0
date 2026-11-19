@@ -101,6 +101,7 @@ pub const HELP: &[Group] = &[
         keys: &[
             (":w", "review the staged diff · enter commits, esc goes back"),
             (":w!", "commit straight away"),
+            (":stage FILE", "stage edits prepared outside m3m0 (json list of {id, front, back?}); review with :diff"),
             (":log", "past commits · enter stages a revert of one"),
             ("u", "undo staged changes one by one (before :w)"),
             (":e!", "drop all staged changes and reload from RemNote"),

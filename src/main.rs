@@ -129,6 +129,7 @@ enum Deferred {
     Search(isize),
     Goto(String),
     Review(Option<String>),
+    Stage(String),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -1242,6 +1243,7 @@ impl App {
                 }
             }
             (Some("w!"), _) => self.deferred.push(Deferred::Commit),
+            (Some("stage"), Some(path)) => self.deferred.push(Deferred::Stage(path.to_owned())),
             (Some("log"), _) => self.overlay = Overlay::Log { entries: commit::read_log(), cur: 0 },
             (Some("help" | "h"), _) => self.overlay = Overlay::Help { scroll: 0, tab: 0 },
             (Some("review"), arg) => {
@@ -1342,6 +1344,7 @@ impl eframe::App for App {
             match job {
                 Deferred::Revert(ops) => self.stage_revert(&ops),
                 Deferred::Commit => self.start_commit(),
+                Deferred::Stage(path) => self.stage_file(&path),
                 Deferred::Search(dir) => self.search_notes(dir),
                 Deferred::Review(arg) => {
                     if let Some(Ok(d)) = self.data.take() {
@@ -2360,6 +2363,44 @@ fn shots(ctx: &egui::Context) {
         ctx.data_mut(|d| d.insert_temp(id, n + 1));
     }
     ctx.request_repaint();
+}
+
+impl App {
+    /// `:stage FILE`: stage text edits prepared outside m3m0 (a JSON list of
+    /// `{"id", "front"?, "back"?}` with new rich text; kind unchanged), so they get
+    /// reviewed in `:diff` and sent with `:w` like any edit. Rems that no longer
+    /// match (missing, or `"was"` given and different) are skipped.
+    fn stage_file(&mut self, path: &str) {
+        let Some(Ok(d)) = &mut self.data else { return };
+        let path = path.strip_prefix("~/").map(|p| kb::home().join(p)).unwrap_or_else(|| path.into());
+        let list: Vec<serde_json::Value> = match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string())) {
+            Ok(l) => l,
+            Err(e) => {
+                self.msg = Some(format!("stage: {}: {e}", path.display()));
+                return;
+            }
+        };
+        let (mut n, mut skipped) = (0, 0);
+        for e in list {
+            let Some(id) = e["id"].as_str() else { continue };
+            if !d.kb.q.contains_key(id) {
+                skipped += 1;
+                continue;
+            }
+            let line = d.kb.line_of(id);
+            let before = edit::LineJson::of(&line);
+            if e.get("was").is_some_and(|w| *w != before.front) {
+                skipped += 1;
+                continue;
+            }
+            let after = edit::LineJson { kind: before.kind.clone(), front: e.get("front").cloned().unwrap_or_else(|| before.front.clone()), back: e.get("back").cloned().unwrap_or_else(|| before.back.clone()) };
+            if after != before {
+                self.changes.apply(&mut d.kb, edit::Op::Update { id: id.to_owned(), before, after });
+                n += 1;
+            }
+        }
+        self.msg = Some(format!("staged {n} {} from {} ({skipped} skipped): :diff to review, :w to send", plural(n, "edit"), path.display()));
+    }
 }
 
 /// `m3m0 roundtrip`: every rem -> editable text -> back, compared with the DB.
