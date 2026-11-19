@@ -389,7 +389,7 @@ impl Graph {
         .min(14.0)
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, focused: bool) -> Option<String> {
+    pub fn show(&mut self, ui: &mut egui::Ui) -> Option<String> {
         self.update_visible();
         self.t += ui.input(|i| i.stable_dt).min(0.1);
         let steps = if self.alpha > 0.3 { 6 } else { 2 };
@@ -537,9 +537,6 @@ impl Graph {
             info += " · local";
         }
         p.text(rect.left_bottom() + Vec2::new(12.0, -10.0), egui::Align2::LEFT_BOTTOM, info, egui::FontId::monospace(12.0), COMMENT);
-        if focused {
-            p.text(rect.right_bottom() + Vec2::new(-12.0, -10.0), egui::Align2::RIGHT_BOTTOM, "hjkl move · tab walk links · / find · enter open · L local · f module · = fit · esc back", egui::FontId::monospace(12.0), COMMENT);
-        }
         if resp.clicked() {
             if let Some(i) = hovered {
                 if Some(i) == self.sel {

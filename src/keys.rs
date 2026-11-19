@@ -225,7 +225,7 @@ pub fn hint(ctx: &str) -> &'static str {
         "notes" => "i/a edit · o new · dd del · >> indent · gd ref · / find · ctrl-f cards · ctrl-g graph",
         "insert" => "esc save · enter new bullet · tab indent · [[ ref",
         "pdf" => "f follow link · b back · o pick file · j/k scroll · ]/[ file · a answers · h notes",
-        "graph" => "hjkl move · tab links · / find · enter open · L local · f module",
+        "graph" => "hjkl move · tab walk links · / find · enter open · L local · f module · = fit · esc back",
         "cards" => "h/l column · ]/[ gaps · enter open · gl link · s stage",
         "review" => "space reveal · 1 again 2 hard 3 good 4 easy · s skip · esc stop",
         "chat" => "enter send · shift-enter newline · ctrl-n new chat · esc notes",

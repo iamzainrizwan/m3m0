@@ -1220,7 +1220,7 @@ impl App {
                 self.overlay = Overlay::Db { list, cur };
             }
             (Some("reload" | "e"), _) if !self.changes.ops.is_empty() => {
-                self.msg = Some(format!("{} staged changes would be lost: :w first, or :e! to drop them", self.changes.ops.len()));
+                self.msg = Some(format!("{} staged {} would be lost: :w first, or :e! to drop them", self.changes.ops.len(), plural(self.changes.ops.len(), "change")));
             }
             (Some("reload" | "e" | "e!"), _) => {
                 self.changes = edit::Changes::default();
@@ -1397,7 +1397,7 @@ impl eframe::App for App {
         // don't lose staged edits: closing with changes staged asks first
         if ctx.input(|i| i.viewport().close_requested()) && !self.changes.ops.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.msg = Some(format!("{} staged changes: :w to commit, :wq to commit and quit, :q! to quit and drop them", self.changes.ops.len()));
+            self.msg = Some(format!("{} staged {}: :w to commit, :wq to commit and quit, :q! to quit and drop them", self.changes.ops.len(), plural(self.changes.ops.len(), "change")));
         }
         if let Some(rx) = &self.committing {
             if let Ok((out, ops)) = rx.try_recv() {
@@ -1511,12 +1511,16 @@ impl App {
                 p.rect_filled(Rect::from_min_size(Pos2::new(t.right() + 1.0, r.top() + 4.0), Vec2::new(8.0, r.height() - 8.0)), 0.0, RED_CURSOR);
                 return;
             }
-            let (mode, col) = match (self.editing.is_some(), self.focus) {
-                (true, _) => (" INSERT ", RED_BRIGHT),
-                (_, Focus::Tree) => (" TREE ", RED),
-                (_, Focus::Notes) => (" NOTES ", RED),
-                (_, Focus::Pdf) => (" PDF ", RED),
-                (_, Focus::Chat) => (" CHAT ", RED_BRIGHT),
+            // the pill names what the keys drive right now (same source as the hint)
+            let (mode, col) = match self.context() {
+                "insert" => (" INSERT ", RED_BRIGHT),
+                "tree" => (" TREE ", RED),
+                "pdf" => (" FILES ", RED),
+                "chat" => (" CHAT ", RED_BRIGHT),
+                "review" => (" REVIEW ", RED),
+                "cards" => (" CARDS ", RED),
+                "graph" => (" GRAPH ", RED),
+                _ => (" NOTES ", RED),
             };
             let pill = p.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, mode, f.clone(), BG);
             p.rect_filled(pill.expand2(Vec2::new(2.0, 3.0)), 0.0, col);
@@ -1838,7 +1842,7 @@ impl App {
             let mut open = None;
             egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ctx, |ui| {
                 if let Some(g) = self.graph.as_mut() {
-                    open = g.show(ui, focused);
+                    open = g.show(ui);
                 }
             });
             if let Some(id) = open.filter(|i| !i.starts_with("hub:")) {
@@ -2034,14 +2038,17 @@ impl App {
             Overlay::Help { scroll, tab } => {
                 let (scroll, tab) = (*scroll, *tab);
                 let g = &keys::HELP[tab];
-                let size = Vec2::new((screen.width() - 80.0).min(900.0), (screen.height() - 80.0).min(160.0 + g.keys.len() as f32 * 30.0 + 90.0).max(360.0));
+                // one height for every section, so switching tabs doesn't move the box
+                let most = keys::HELP.iter().map(|g| g.keys.len()).max().unwrap_or(0);
+                let size = Vec2::new((screen.width() - 80.0).min(900.0), (screen.height() - 80.0).min(160.0 + most as f32 * 30.0 + 90.0).max(360.0));
                 modal(ctx, "keys", screen, size, |ui| {
                     // section tabs
                     ui.horizontal_wrapped(|ui| {
                         ui.spacing_mut().item_spacing = Vec2::new(4.0, 6.0);
                         for (i, s) in keys::HELP.iter().enumerate() {
                             let sel = i == tab;
-                            let t = RichText::new(format!(" {} ", s.title)).size(12.5).color(if sel { BG } else { FG_DIM });
+                            let short = s.title.split(" (").next().unwrap_or(s.title); // "graph (ctrl-g)" -> "graph"
+                            let t = RichText::new(format!(" {short} ")).size(12.5).color(if sel { BG } else { FG_DIM });
                             let t = if sel { t.background_color(RED) } else { t.background_color(GREY0) };
                             ui.label(t);
                         }
@@ -2122,6 +2129,27 @@ impl App {
                     }
                     ui.add_space(8.0);
                     ui.label(RichText::new("type to filter · ctrl-n/p or tab move · enter go · esc close").color(COMMENT).size(12.0));
+                });
+            }
+            Overlay::Link(lp) => {
+                // closest matches first; show a window of rows around the cursor
+                const ROWS: usize = 14;
+                let start = lp.cur.saturating_sub(ROWS / 2).min(lp.items.len().saturating_sub(ROWS));
+                modal(ctx, "link to claude's card", screen, Vec2::new(820.0, 150.0 + ROWS as f32 * 26.0), |ui| {
+                    ui.add(egui::Label::new(RichText::new(&lp.title).color(FG_BRIGHT).size(14.0)).truncate());
+                    ui.add_space(8.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for (i, ((_, score), label)) in lp.items.iter().zip(&lp.labels).enumerate().skip(start).take(ROWS) {
+                        row(ui, ("link", i), i == lp.cur, true, 0.0, |ui| {
+                            ui.label(RichText::new(format!("{:>3}%", (score * 100.0).round() as i32)).color(COMMENT).size(12.5));
+                            ui.add(egui::Label::new(RichText::new(label).size(14.0).color(if i == lp.cur { FG_BRIGHT } else { FG_DIM })).truncate());
+                        });
+                    }
+                    if lp.items.is_empty() {
+                        ui.label(RichText::new("claude's deck for this week is empty").color(COMMENT));
+                    }
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("closest first · j/k or ctrl-n/p move · enter link · esc close").color(COMMENT).size(12.0));
                 });
             }
             Overlay::Db { list, cur } => {
@@ -2530,4 +2558,9 @@ fn answer(ui: &mut egui::Ui, kb: &Kb, math: &mut math::Math, text: &str) {
     if let Some(c) = code {
         ui.add(egui::Label::new(RichText::new(c).monospace().size(NOTE_TEXT - 2.5).color(FG)).wrap());
     }
+}
+
+/// "1 change", "3 changes"
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 { word.to_owned() } else { format!("{word}s") }
 }

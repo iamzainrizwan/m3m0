@@ -89,7 +89,7 @@ impl Boot {
         for d in logo_dots() {
             parts.push(Particle {
                 home: Vec2::new(rng(&mut seed), rng(&mut seed)),
-                ph: rng(&mut seed) * 6.283,
+                ph: rng(&mut seed) * std::f32::consts::TAU,
                 speed: 0.4 + rng(&mut seed),
                 target: Some(d),
                 delay: d.0 / LOGO_COLS * 0.35 + rng(&mut seed) * 0.15,
@@ -98,7 +98,7 @@ impl Boot {
         for _ in 0..70 {
             parts.push(Particle {
                 home: Vec2::new(rng(&mut seed), rng(&mut seed)),
-                ph: rng(&mut seed) * 6.283,
+                ph: rng(&mut seed) * std::f32::consts::TAU,
                 speed: 0.4 + rng(&mut seed),
                 target: None,
                 delay: 0.0,
