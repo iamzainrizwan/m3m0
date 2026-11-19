@@ -173,8 +173,12 @@ impl Kb {
         let d = &self.q[i];
         let key = self.text(d.get("key"), true);
         let val = self.text(d.get("value"), true);
+        // card items: old notes tag children with the Card Item power-up in tp;
+        // the plugin SDK's setIsCardItem writes apu.w (MultiLineCard) instead
         let multi = self.children(Some(i)).iter().any(|k| {
-            self.q[k].get("tp").and_then(|t| t.get(CARD_ITEM)).is_some()
+            let d = &self.q[k];
+            d.get("tp").and_then(|t| t.get(CARD_ITEM)).is_some()
+                || d.pointer("/apu/w/v").and_then(Value::as_bool) == Some(true)
         });
         match d.get("type").and_then(Value::as_i64) {
             Some(1) => return format!("{key} :: {val}"),

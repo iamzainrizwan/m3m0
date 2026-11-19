@@ -4,7 +4,7 @@ Build hours are Claude's; "you" = Zain's testing time. Commit + push after each.
 
 | # | phase | status |
 |---|---|---|
-| 0 | spikes: plugin bridge, KaTeX look, PDF renderer (~3h, you 0.5h) | math ✓ RaTeX, pdf ✓ hayro, bridge: plumbing ✓, needs a RemNote run |
+| 0 | spikes: plugin bridge, KaTeX look, PDF renderer (~3h, you 0.5h) | math ✓ RaTeX, pdf ✓ hayro, bridge ✓ (5/6, see bridge.md); left: `>>>` check, hidden sync |
 | 1 | skeleton + read model: rice theme, KB port, module/week tree (~3h) | ✓ plus boot anim, vim nav, titlebar, icon, :db |
 | 2 | outliner editor: vim modes, indent, collapse, all syntax, `[[ref]]` autocomplete, KaTeX inline (~8h, you 1h) | |
 | 3 | changesets: staged diff, commit via bridge, log, revert, backup, commit wins (~5h) | |

@@ -50,14 +50,24 @@ TOO_EARLY 0.01, RESET 3.
 - Multi-line `>>>`: `setIsCardItem` on children (and maybe the `w` MultiLineCard
   power-up); bridge-test checks what RemNote generates.
 
-## unconfirmed (phase 0 tests these)
+## phase 0 results (2026-11-19, RemNote 1.28.x desktop)
 
-1. sandboxed plugin can reach `ws://127.0.0.1` in the desktop app
-2. "Develop from localhost" survives a RemNote restart
-3. every card kind and rich-text kind round-trips (bridge-test prints them)
-4. `updateCardRepetitionStatus` schedules like a real review
-5. the plugin's writes carry fresh `,u` stamps and reach the phone
-6. RemNote keeps syncing while hidden/minimised; any way to start it hidden
+1. ✓ sandboxed plugin reaches `ws://127.0.0.1` (no `requestNative` needed)
+2. ✓ "Develop from localhost" survives a RemNote restart
+3. ✓ round-trip, checked in the DB: heading (`ps.r_s.v.s`), `::` (`type 1`),
+   `;;` (`type 2`), `>>` (`enableBackSR false`), `<>` (`true`, cards f+b),
+   latex / code / bold / `[[ref]]` stored byte-identical to our JSON, cloze via
+   `cId` generates a cloze card
+   - `>>>`: `setIsCardItem` tags children with `apu.w` (MultiLineCard), not
+     the `tp` Card Item tag hand-typed notes use; parent gets a forward card.
+     Pending: confirm it reviews as a multi-line card on the phone.
+4. ✓ `updateCardRepetitionStatus(GOOD)` adds a history entry
+5. ✓ every written field has fresh `,u` stamps; the tree reached the phone
+6. pending: syncing while hidden; starting hidden
+
+Side finding: RemNote's daily backup job zips and unlinks every entry in
+`<kb>/backups/` and errors on directories, so never put anything there.
+remnote.py's pre-write copies now go to `~/.local/share/m3m0/remnote-backups/`.
 
 ## running the test
 

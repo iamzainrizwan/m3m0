@@ -7,6 +7,8 @@ Reverse-read from RemNote 1.28.50's app JS and DB on 2026-10-22 (originally in
 
 - `~/remnote/remnote-<kb id>/remnote.db` (SQLite, WAL), plus `files/` for
   images (`%LOCAL_FILE%<name>` in rich text).
+- `<kb>/backups/`: RemNote's own daily zips. Its cleanup zips and unlinks
+  every entry there and errors on folders: keep everything else out.
 - Other folders under `~/remnote/` (`browser/`, `remnote-browser/`, `lnotes/`)
   are other copies/KBs; `:db` lists them all.
 - The desktop app's Electron profile is `~/.config/RemNote` (IndexedDB etc.),
@@ -20,7 +22,8 @@ Reverse-read from RemNote 1.28.50's app JS and DB on 2026-10-22 (originally in
   - `doc.type`: 1 concept (`::`), 2 descriptor (`;;`).
   - `doc.enableBackSR`: value + this = `<>`; value alone = `>>`.
   - no value + children tagged with the Card Item power-up
-    (`SrPWzY0xLzu625Ted` in `doc.tp`) = `>>>`.
+    (`SrPWzY0xLzu625Ted` in `doc.tp`) = `>>>`. Children made through the
+    plugin SDK carry `doc.apu.w.v = true` (MultiLineCard) instead.
   - `doc.ps.r_s.v.s`: heading level `"H0"`..`"H4"`.
   - every field has `"<field>,u"` / `"<field>,o"` sync stamps.
 - `cards(_id, doc, x, rId)`: one row per card direction; `doc.k` ends with the
