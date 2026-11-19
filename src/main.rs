@@ -9,6 +9,7 @@ mod editor;
 mod icon;
 mod kb;
 mod graph;
+mod keys;
 mod math;
 mod pdf;
 mod render;
@@ -102,13 +103,25 @@ enum Focus {
 
 enum Overlay {
     None,
-    Help,
+    Help { scroll: usize },
+    /// ctrl-t: jump to any week or rem by name
+    Find { q: String, items: Vec<(String, String)>, cur: usize, for_q: Option<String> },
     Db { list: Vec<DbCandidate>, cur: usize },
     Cmd(String),
     /// staged changes; enter commits
     Diff { scroll: usize },
     Log { entries: Vec<commit::Entry>, cur: usize },
     Link(cards::LinkPick),
+}
+
+/// Actions that need the loaded data, queued during key handling (when the
+/// data is borrowed out) and run right after.
+enum Deferred {
+    Revert(Vec<edit::Op>),
+    Link(String, usize),
+    Commit,
+    Search(isize),
+    Goto(String),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -160,6 +173,7 @@ struct App {
     view_graph: bool,
     cards: Option<cards::CardsView>,
     graph_anchor: Option<usize>,
+    deferred: Vec<Deferred>,
     last_search: Option<String>,
     links: std::collections::HashMap<String, String>,
 }
@@ -284,6 +298,7 @@ impl App {
             view_graph: false,
             cards: None,
             graph_anchor: None,
+            deferred: vec![],
             last_search: None,
             links: deck::load_links(),
         }
@@ -475,9 +490,10 @@ impl App {
             (_, K::Ch('z')) => self.pending.push('z'),
             (_, K::Ch(':')) => self.overlay = Overlay::Cmd(String::new()),
             (_, K::Ch('/')) => self.overlay = Overlay::Cmd("/".into()),
-            (_, K::Ch('n')) if self.focus == Focus::Notes => self.search_notes(n as isize),
-            (_, K::Ch('N')) if self.focus == Focus::Notes => self.search_notes(-(n as isize)),
-            (_, K::Ch('?')) => self.overlay = Overlay::Help,
+            (_, K::Ch('n')) if self.focus == Focus::Notes => self.deferred.push(Deferred::Search(1)),
+            (_, K::Ch('N')) if self.focus == Focus::Notes => self.deferred.push(Deferred::Search(-1)),
+            (_, K::Ch('?')) => self.overlay = Overlay::Help { scroll: 0 },
+            (_, K::Ctrl('t')) => self.overlay = Overlay::Find { q: String::new(), items: vec![], cur: 0, for_q: None },
             (_, K::Ch('G')) => self.jump(usize::MAX, trows.len(), nrows.len()),
             (_, K::Tab) => self.toggle_focus(),
             (_, K::Ctrl('h')) if self.cfg.sidebar_open => self.focus = Focus::Tree,
@@ -812,11 +828,36 @@ impl App {
 
     fn handle_overlay(&mut self, ctx: &egui::Context, k: K) {
         match &mut self.overlay {
-            Overlay::Help => {
-                if matches!(k, K::Esc | K::Ch('q') | K::Ch('?') | K::Enter) {
-                    self.overlay = Overlay::None;
+            Overlay::Help { scroll } => match k {
+                K::Ch('j') | K::Down => *scroll += 1,
+                K::Ch('k') | K::Up => *scroll = scroll.saturating_sub(1),
+                K::Ctrl('d') => *scroll += 12,
+                K::Ctrl('u') => *scroll = scroll.saturating_sub(12),
+                K::Ch('G') => *scroll = 999,
+                K::Ch('g') => *scroll = 0,
+                K::Esc | K::Ch('q') | K::Ch('?') | K::Enter => self.overlay = Overlay::None,
+                _ => {}
+            },
+            Overlay::Find { q, items, cur, .. } => match k {
+                K::Ch(c) => {
+                    q.push(c);
+                    *cur = 0;
                 }
-            }
+                K::Back => {
+                    q.pop();
+                    *cur = 0;
+                }
+                K::Down | K::Ctrl('n') | K::Tab => *cur = (*cur + 1).min(items.len().saturating_sub(1)),
+                K::Up | K::Ctrl('p') | K::ShiftTab => *cur = cur.saturating_sub(1),
+                K::Enter => {
+                    if let Some((id, _)) = items.get(*cur).cloned() {
+                        self.overlay = Overlay::None;
+                        self.deferred.push(Deferred::Goto(id));
+                    }
+                }
+                K::Esc => self.overlay = Overlay::None,
+                _ => {}
+            },
             Overlay::Cmd(s) => match k {
                 K::Ch(c) => s.push(c),
                 K::Back => {
@@ -851,7 +892,7 @@ impl App {
                 K::Ch('k') | K::Up => *scroll = scroll.saturating_sub(1),
                 K::Enter => {
                     self.overlay = Overlay::None;
-                    self.start_commit();
+                    self.deferred.push(Deferred::Commit);
                 }
                 K::Esc | K::Ch('q') => self.overlay = Overlay::None,
                 _ => {}
@@ -863,7 +904,7 @@ impl App {
                     if let Some(e) = entries.get(*cur) {
                         let ops = e.ops.clone();
                         self.overlay = Overlay::None;
-                        self.stage_revert(&ops);
+                        self.deferred.push(Deferred::Revert(ops));
                     }
                 }
                 K::Esc | K::Ch('q') => self.overlay = Overlay::None,
@@ -875,16 +916,8 @@ impl App {
                 K::Enter => {
                     let (rem, card) = (lp.rem.clone(), lp.items.get(lp.cur).map(|x| x.0));
                     self.overlay = Overlay::None;
-                    if let (Some(card), Some(Ok(d))) = (card, self.data.take()) {
-                        let reopen = self.cards.is_some();
-                        if !reopen {
-                            self.open_cards(&d);
-                        }
-                        self.do_link(&d, &rem, card);
-                        if !reopen {
-                            self.cards = None;
-                        }
-                        self.data = Some(Ok(d));
+                    if let Some(card) = card {
+                        self.deferred.push(Deferred::Link(rem, card));
                     }
                 }
                 K::Esc | K::Ch('q') => self.overlay = Overlay::None,
@@ -1010,7 +1043,7 @@ impl App {
                     }
                 }
             } else {
-                self.search_notes(1);
+                self.deferred.push(Deferred::Search(1));
             }
             return;
         }
@@ -1049,9 +1082,10 @@ impl App {
                     self.overlay = Overlay::Diff { scroll: 0 };
                 }
             }
-            (Some("w!"), _) => self.start_commit(),
+            (Some("w!"), _) => self.deferred.push(Deferred::Commit),
             (Some("log"), _) => self.overlay = Overlay::Log { entries: commit::read_log(), cur: 0 },
-            (Some("help" | "h"), _) => self.overlay = Overlay::Help,
+            (Some("help" | "h"), _) => self.overlay = Overlay::Help { scroll: 0 },
+            (Some("find" | "f"), _) => self.overlay = Overlay::Find { q: String::new(), items: vec![], cur: 0, for_q: None },
             (Some(""), _) | (None, _) => {}
             (Some(c), _) => self.msg = Some(format!("not a command: {c}")),
         }
@@ -1103,6 +1137,51 @@ impl eframe::App for App {
             }
             for k in ks {
                 self.handle(ctx, k);
+            }
+        }
+        for job in std::mem::take(&mut self.deferred) {
+            match job {
+                Deferred::Revert(ops) => self.stage_revert(&ops),
+                Deferred::Commit => self.start_commit(),
+                Deferred::Search(dir) => self.search_notes(dir),
+                Deferred::Goto(id) => {
+                    if let Some(Ok(d)) = self.data.take() {
+                        self.view_graph = false;
+                        self.cards = None;
+                        if d.mods.contains(&id) {
+                            self.open_mods.insert(id.clone());
+                            self.focus = Focus::Tree;
+                            self.tree_cur = tree_rows(&d, &self.open_mods).iter().position(|r| r.0 == id).unwrap_or(0);
+                            self.scroll_tree = true;
+                        } else if d.kb.q.get(&id).and_then(|x| x.get("parent")).and_then(|p| p.as_str()).is_some_and(|p| d.mods.iter().any(|m| m == p)) {
+                            // a week: open it as the page
+                            if let Some(w) = &self.week {
+                                self.jumps.push((w.clone(), self.note_cur));
+                            }
+                            let m = d.kb.q[&id]["parent"].as_str().unwrap_or_default().to_owned();
+                            self.open_mods.insert(m);
+                            self.tree_cur = tree_rows(&d, &self.open_mods).iter().position(|r| r.0 == id).unwrap_or(0);
+                            self.scroll_tree = true;
+                            self.open_week(id);
+                        } else {
+                            self.goto(&d, &id);
+                        }
+                        self.data = Some(Ok(d));
+                    }
+                }
+                Deferred::Link(rem, card) => {
+                    if let Some(Ok(d)) = self.data.take() {
+                        let reopen = self.cards.is_some();
+                        if !reopen {
+                            self.open_cards(&d);
+                        }
+                        self.do_link(&d, &rem, card);
+                        if !reopen {
+                            self.cards = None;
+                        }
+                        self.data = Some(Ok(d));
+                    }
+                }
             }
         }
         if let Some(rx) = &self.committing {
@@ -1224,10 +1303,10 @@ impl App {
             p.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, mode, f.clone(), BG);
             let left = match (&self.msg, &self.data) {
                 (Some(m), _) => m.clone(),
-                (None, Some(Ok(d))) => {
+                (None, Some(Ok(_))) => {
                     let staged = self.changes.ops.len();
-                    let st = if staged > 0 { format!("{staged} staged (:w to commit, u to undo)") } else { "nothing staged".into() };
-                    format!("{} rems · {} cards · {st}", d.kb.q.len(), d.kb.cards)
+                    let hint = keys::hint(self.context());
+                    if staged > 0 { format!("{staged} staged · :w commit · u undo   │   {hint}") } else { hint.to_owned() }
                 }
                 (None, Some(Err(_))) => "load failed".into(),
                 (None, None) => "loading…".into(),
@@ -1505,31 +1584,123 @@ impl App {
         self.scroll_tree = true;
     }
 
+    fn context(&self) -> &'static str {
+        if self.editing.is_some() {
+            "insert"
+        } else if self.focus == Focus::Tree {
+            "tree"
+        } else if self.focus == Focus::Pdf {
+            "pdf"
+        } else if self.cards.is_some() {
+            "cards"
+        } else if self.view_graph {
+            "graph"
+        } else {
+            "notes"
+        }
+    }
+
+    fn which_key(&self, ctx: &egui::Context) {
+        if self.pending.is_empty() || !matches!(self.overlay, Overlay::None) {
+            return;
+        }
+        let items = keys::which(&self.pending, self.context());
+        if items.is_empty() {
+            return;
+        }
+        let screen = ctx.screen_rect();
+        let h = 34.0 + items.len() as f32 * 20.0;
+        let at = Pos2::new(screen.right() - 380.0, screen.bottom() - STATUS_H - h - 12.0);
+        egui::Area::new(egui::Id::new("which")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
+            egui::Frame::new().fill(BG_ALT).stroke((1.0, GREY1)).inner_margin(10.0).show(ui, |ui| {
+                ui.set_width(350.0);
+                ui.label(RichText::new(format!("{}…", self.pending)).color(RED_BRIGHT).family(bold()).size(13.0));
+                for (k, what) in items {
+                    ui.horizontal(|ui| {
+                        ui.allocate_ui_with_layout(Vec2::new(90.0, 18.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                            ui.set_width(90.0);
+                            ui.label(RichText::new(k).color(FG_BRIGHT).size(13.0));
+                        });
+                        ui.label(RichText::new(what).color(FG_DIM).size(13.0));
+                    });
+                }
+            });
+        });
+    }
+
     fn overlays(&mut self, ctx: &egui::Context) {
+        self.which_key(ctx);
+        if let (Overlay::Find { q, items, cur, for_q }, Some(Ok(d))) = (&mut self.overlay, &self.data) {
+            if for_q.as_deref() != Some(q.as_str()) {
+                *items = find_items(d, q);
+                *for_q = Some(q.clone());
+                *cur = (*cur).min(items.len().saturating_sub(1));
+            }
+        }
         let screen = ctx.screen_rect();
         match &self.overlay {
-            Overlay::Help => {
-                let groups: &[(&str, &[(&str, &str)])] = &[
-                    ("move", &[("j / k", "down / up (5j works)"), ("gg / G", "top / bottom"), ("ctrl-d / ctrl-u", "half page"), ("h / l", "out / in (tree: collapse / open)"), ("ctrl-j / ctrl-k", "next / previous week"), ("gd / ctrl-o", "go to [[ref]] / jump back")]),
-                    ("panes", &[("tab", "switch tree / notes"), ("ctrl-h / ctrl-l", "focus tree / notes"), ("ctrl-b", "toggle sidebar"), ("ctrl-p", "toggle week PDFs"), ("ctrl-g", "graph view (hjkl, enter, L local, f filter)"), ("< / >", "narrow / widen sidebar (tree)")]),
-                    ("pdf panel", &[("j / k  ctrl-d / u", "scroll"), ("J / K", "next / previous page"), ("[ / ]", "previous / next file"), ("+ / - / =", "zoom / reset"), ("< / >", "widen / narrow panel")]),
-                    ("edit", &[("i a / I A", "edit bullet (start / end)"), ("o / O", "new bullet below / above"), ("enter / tab / s-tab", "(insert) new bullet / indent / outdent"), ("dd", "delete bullet"), (">> / <<", "indent / outdent"), ("alt-j / alt-k", "move bullet down / up"), ("u / ctrl-r", "undo / redo"), (":w  :w!  :log", "review + commit / commit / history")]),
-                    ("fold", &[("za / enter", "toggle"), ("zc / zo", "close / open"), ("zM / zR", "fold all / unfold all")]),
-                    ("app", &[(":", "command  (:q :db :reload :zoom 130)"), ("ctrl +/- / ctrl 0", "zoom (saved)"), ("?", "this help")]),
-                ];
-                modal(ctx, "keys", screen, Vec2::new(620.0, screen.height() - 80.0), |ui| {
-                    for (g, ks) in groups {
-                        ui.label(RichText::new(*g).color(RED).family(bold()).size(13.0));
-                        ui.add_space(2.0);
-                        for (k, what) in *ks {
-                            ui.horizontal(|ui| {
-                                ui.add_sized([170.0, 18.0], egui::Label::new(RichText::new(*k).color(FG_BRIGHT).size(13.5)));
-                                ui.label(RichText::new(*what).color(FG_DIM).size(13.5));
-                            });
-                        }
-                        ui.add_space(10.0);
+            Overlay::Help { scroll } => {
+                let scroll = *scroll;
+                let size = Vec2::new((screen.width() - 60.0).min(1240.0), screen.height() - 60.0);
+                modal(ctx, "keys  ·  everything m3m0 does from the keyboard", screen, size, |ui| {
+                    let colw = (size.x - 36.0 - 24.0) / 2.0;
+                    egui::ScrollArea::vertical().max_height(size.y - 100.0).vertical_scroll_offset(scroll as f32 * 22.0).show(ui, |ui| {
+                        ui.horizontal_top(|ui| {
+                            let half = keys::HELP.iter().map(|g| g.keys.len() + 2).sum::<usize>() / 2;
+                            let mut acc = 0;
+                            let split = keys::HELP.iter().position(|g| {
+                                acc += g.keys.len() + 2;
+                                acc >= half
+                            }).map(|i| i + 1).unwrap_or(keys::HELP.len());
+                            for (ci, groups) in [&keys::HELP[..split], &keys::HELP[split..]].into_iter().enumerate() {
+                                ui.vertical(|ui| {
+                                    ui.set_width(colw);
+                                    for g in groups {
+                                        ui.label(RichText::new(g.title).color(RED).family(bold()).size(13.5));
+                                        ui.add_space(3.0);
+                                        for (k, what) in g.keys {
+                                            ui.horizontal_top(|ui| {
+                                                ui.allocate_ui_with_layout(Vec2::new(colw * 0.36, 18.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                                    ui.set_width(colw * 0.36);
+                                                    ui.add(egui::Label::new(RichText::new(*k).color(FG_BRIGHT).size(13.0)).truncate());
+                                                });
+                                                ui.add(egui::Label::new(RichText::new(*what).color(FG_DIM).size(13.0)).wrap());
+                                            });
+                                        }
+                                        ui.add_space(12.0);
+                                    }
+                                });
+                                if ci == 0 {
+                                    ui.add_space(24.0);
+                                }
+                            }
+                        });
+                    });
+                    ui.add_space(6.0);
+                    ui.label(RichText::new("j/k ctrl-d/u scroll · esc close · while typing a prefix (g z d > < or a count) a hint box shows what can follow").color(COMMENT).size(12.0));
+                });
+            }
+            Overlay::Find { q, items, cur, .. } => {
+                let cur = *cur;
+                let q = q.clone();
+                let items = items.clone();
+                modal(ctx, "go to", screen, Vec2::new(760.0, 120.0 + 14.0 * 26.0), |ui| {
+                    ui.horizontal(|ui| {
+                        let t = ui.label(RichText::new(format!("> {q}")).color(FG_BRIGHT).size(15.0));
+                        ui.painter().rect_filled(Rect::from_min_size(t.rect.right_top() + Vec2::new(2.0, 2.0), Vec2::new(8.0, t.rect.height() - 4.0)), 0.0, RED_CURSOR);
+                    });
+                    ui.add_space(6.0);
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for (i, (_, label)) in items.iter().enumerate() {
+                        row(ui, ("find", i), i == cur, true, 0.0, |ui| {
+                            ui.add(egui::Label::new(RichText::new(label).size(14.0).color(if i == cur { FG_BRIGHT } else { FG_DIM })).truncate());
+                        });
                     }
-                    ui.label(RichText::new("esc to close").color(COMMENT).size(12.0));
+                    if items.is_empty() {
+                        ui.label(RichText::new(if q.is_empty() { "type a week, module or rem name" } else { "no matches" }).color(COMMENT));
+                    }
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("type to filter · ctrl-n/p or tab move · enter go · esc close").color(COMMENT).size(12.0));
                 });
             }
             Overlay::Db { list, cur } => {
@@ -1829,4 +2000,56 @@ fn commit_test(keep: bool) -> i32 {
         println!("deleted scratch tree");
     }
     (out.err.is_some()) as i32
+}
+
+/// ctrl-t candidates: modules and weeks first, then any rem, by name.
+fn find_items(d: &Loaded, q: &str) -> Vec<(String, String)> {
+    let ql = q.to_lowercase();
+    let mut out: Vec<(u8, usize, String, String)> = vec![];
+    let rank = |name: &str| -> Option<u8> {
+        let n = name.to_lowercase();
+        if ql.is_empty() || n.starts_with(&ql) {
+            Some(0)
+        } else if n.contains(&ql) {
+            Some(1)
+        } else {
+            // every word of the query somewhere in the name
+            ql.split_whitespace().all(|w| n.contains(w)).then_some(2)
+        }
+    };
+    let mut seen = HashSet::new();
+    for m in &d.mods {
+        let mn = d.kb.name(m);
+        if let Some(r) = rank(&mn) {
+            out.push((r, mn.len(), m.clone(), format!("{mn}  (module)")));
+        }
+        for w in d.kb.children(Some(m)) {
+            let wn = d.kb.name(w);
+            if !wn.starts_with("Week") {
+                continue;
+            }
+            let full = format!("{mn} / {wn}");
+            if let Some(r) = rank(&full).or_else(|| rank(&wn)) {
+                out.push((r, full.len(), w.clone(), full));
+                seen.insert(w.clone());
+            }
+        }
+    }
+    if !ql.is_empty() {
+        for id in d.kb.q.keys() {
+            if seen.contains(id) || d.mods.contains(id) {
+                continue;
+            }
+            let n = d.kb.name(id).replace('\n', " ");
+            if n.is_empty() || n.len() > 160 {
+                continue;
+            }
+            if let Some(r) = rank(&n) {
+                let where_ = d.kb.module_of(id).map(|m| d.kb.name(&m)).unwrap_or_default();
+                out.push((r + 1, n.len(), id.clone(), format!("{n}   · {where_}")));
+            }
+        }
+    }
+    out.sort();
+    out.into_iter().take(14).map(|x| (x.2, x.3)).collect()
 }
