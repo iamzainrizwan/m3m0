@@ -6,6 +6,7 @@ mod edit;
 mod editor;
 mod icon;
 mod kb;
+mod graph;
 mod math;
 mod pdf;
 mod render;
@@ -152,6 +153,8 @@ struct App {
     bridge: bridge::Bridge,
     committing: Option<mpsc::Receiver<(commit::Outcome, Vec<edit::Op>)>>,
     pdfs: pdf::Pdfs,
+    graph: Option<graph::Graph>,
+    view_graph: bool,
 }
 
 fn load(db: Option<PathBuf>) -> Result<Loaded, String> {
@@ -268,6 +271,8 @@ impl App {
             bridge,
             committing: None,
             pdfs,
+            graph: None,
+            view_graph: false,
         }
     }
 
@@ -394,6 +399,15 @@ impl App {
         let trows = tree_rows(d, &self.open_mods);
         let nrows = self.week.as_ref().map(|w| note_rows(&d.kb, w, &self.folded)).unwrap_or_default();
 
+        if let K::Ctrl('g') = k {
+            self.toggle_graph(d, &nrows);
+            return;
+        }
+        if self.view_graph && self.focus != Focus::Pdf && self.focus != Focus::Tree {
+            if self.graph_key(d, k, n) {
+                return;
+            }
+        }
         if let K::Ctrl('p') = k {
             self.cfg.pdf_open = !self.cfg.pdf_open;
             self.focus = if self.cfg.pdf_open { Focus::Pdf } else { Focus::Notes };
@@ -518,6 +532,73 @@ impl App {
             Focus::Pdf => Focus::Notes,
             f => f,
         };
+    }
+
+    fn toggle_graph(&mut self, d: &Loaded, rows: &[(String, usize)]) {
+        self.view_graph = !self.view_graph;
+        if !self.view_graph {
+            return;
+        }
+        self.focus = Focus::Notes;
+        if self.graph.is_none() {
+            self.graph = Some(graph::Graph::build(&d.kb, &d.mods));
+        }
+        // select the node nearest the cursor rem (or the open page)
+        let g = self.graph.as_mut().unwrap();
+        let mut cur = rows.get(self.note_cur).map(|r| r.0.clone()).or(self.week.clone());
+        while let Some(c) = cur {
+            if g.index.contains_key(&c) {
+                g.select_id(&c);
+                break;
+            }
+            cur = d.kb.q.get(&c).and_then(|x| x.get("parent")).and_then(|p| p.as_str()).map(str::to_owned);
+        }
+    }
+
+    fn graph_key(&mut self, d: &Loaded, k: K, n: usize) -> bool {
+        let Some(g) = self.graph.as_mut() else { return false };
+        let _ = n;
+        match k {
+            K::Ch('h') | K::Left => g.step(Vec2::new(-1.0, 0.0)),
+            K::Ch('l') | K::Right => g.step(Vec2::new(1.0, 0.0)),
+            K::Ch('j') | K::Down => g.step(Vec2::new(0.0, 1.0)),
+            K::Ch('k') | K::Up => g.step(Vec2::new(0.0, -1.0)),
+            K::Ch('L') => {
+                let on = g.local.is_none();
+                g.set_local(on);
+            }
+            K::Ch('f') => g.cycle_filter(&d.mods),
+            K::Ch('+') => {
+                g.scale = (g.scale * 1.25).min(6.0);
+                g.fit = false;
+                g.follow = g.sel.is_some();
+            }
+            K::Ch('-') => {
+                g.scale = (g.scale / 1.25).max(0.02);
+                g.fit = false;
+                g.follow = g.sel.is_some();
+            }
+            K::Ch('c') => {
+                g.fit = false;
+                g.follow = true;
+            }
+            K::Ch('=') => {
+                g.fit = true;
+                g.follow = false;
+            }
+            K::Ch('r') => {
+                self.graph = Some(graph::Graph::build(&d.kb, &d.mods));
+            }
+            K::Enter => {
+                if let Some(id) = g.sel.map(|s| g.nodes[s].id.clone()).filter(|i| !i.starts_with("hub:")) {
+                    self.view_graph = false;
+                    self.goto(d, &id);
+                }
+            }
+            K::Esc => self.view_graph = false,
+            _ => return false,
+        }
+        true
     }
 
     /// Keys while the PDF panel has focus. Returns true if handled.
@@ -1159,6 +1240,19 @@ impl App {
 
     fn notes(&mut self, ctx: &egui::Context, d: &Loaded) {
         let focused = self.focus == Focus::Notes;
+        if self.view_graph {
+            let mut open = None;
+            egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ctx, |ui| {
+                if let Some(g) = self.graph.as_mut() {
+                    open = g.show(ui, focused);
+                }
+            });
+            if let Some(id) = open.filter(|i| !i.starts_with("hub:")) {
+                self.view_graph = false;
+                self.goto(d, &id);
+            }
+            return;
+        }
         egui::CentralPanel::default()
             .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin { left: 24, right: 12, top: 16, bottom: 0 }))
             .show(ctx, |ui| {
@@ -1290,7 +1384,7 @@ impl App {
             Overlay::Help => {
                 let groups: &[(&str, &[(&str, &str)])] = &[
                     ("move", &[("j / k", "down / up (5j works)"), ("gg / G", "top / bottom"), ("ctrl-d / ctrl-u", "half page"), ("h / l", "out / in (tree: collapse / open)"), ("ctrl-j / ctrl-k", "next / previous week"), ("gd / ctrl-o", "go to [[ref]] / jump back")]),
-                    ("panes", &[("tab", "switch tree / notes"), ("ctrl-h / ctrl-l", "focus tree / notes"), ("ctrl-b", "toggle sidebar"), ("ctrl-p", "toggle week PDFs"), ("< / >", "narrow / widen sidebar (tree)")]),
+                    ("panes", &[("tab", "switch tree / notes"), ("ctrl-h / ctrl-l", "focus tree / notes"), ("ctrl-b", "toggle sidebar"), ("ctrl-p", "toggle week PDFs"), ("ctrl-g", "graph view (hjkl, enter, L local, f filter)"), ("< / >", "narrow / widen sidebar (tree)")]),
                     ("pdf panel", &[("j / k  ctrl-d / u", "scroll"), ("J / K", "next / previous page"), ("[ / ]", "previous / next file"), ("+ / - / =", "zoom / reset"), ("< / >", "widen / narrow panel")]),
                     ("edit", &[("i a / I A", "edit bullet (start / end)"), ("o / O", "new bullet below / above"), ("enter / tab / s-tab", "(insert) new bullet / indent / outdent"), ("dd", "delete bullet"), (">> / <<", "indent / outdent"), ("alt-j / alt-k", "move bullet down / up"), ("u / ctrl-r", "undo / redo"), (":w  :w!  :log", "review + commit / commit / history")]),
                     ("fold", &[("za / enter", "toggle"), ("zc / zo", "close / open"), ("zM / zR", "fold all / unfold all")]),
