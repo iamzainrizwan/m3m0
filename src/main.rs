@@ -333,6 +333,11 @@ impl App {
 
     /// M3M0_OPEN="FC2/Week 8" opens a week on load (for previews).
     fn preselect(&mut self) {
+        // M3M0_OPEN_ID=<rem id>: open any rem as the page (scratch-tree tests)
+        if let (Ok(id), Some(Ok(_))) = (std::env::var("M3M0_OPEN_ID"), &self.data) {
+            self.open_week(id);
+            return;
+        }
         let Ok(path) = std::env::var("M3M0_OPEN") else { return };
         let Some(Ok(d)) = &self.data else { return };
         let (m, w) = path.split_once('/').unwrap_or((&path, ""));
