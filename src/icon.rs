@@ -1,34 +1,37 @@
-//! App icon: the logo's dot-matrix glyphs stacked 2x2 ("m3" over "m0"),
-//! white m's and red digits on black. Drawn in code so it can't drift from the logo.
+//! App icon: a dot-matrix "m" with a red block cursor after it (vim, keyboard-first),
+//! white on black, same dot style as the logo.
 
-use crate::boot::GLYPHS;
+/// 7-row m (the logo's m is x-height only; at icon size the full height reads better)
+const M: [&str; 7] = ["####.", "#.#.#", "#.#.#", "#.#.#", "#.#.#", "#.#.#", "#.#.#"];
 
 pub fn rgba(size: u32) -> Vec<u8> {
     let mut px = vec![0u8; (size * size * 4) as usize];
     for a in px.chunks_mut(4) {
         a[3] = 255;
     }
-    let grid = 17.0; // 11x15 glyph block centred in a 17x17 grid
+    let grid = 13.0; // 5-wide m + gap + 2-wide cursor, centred in a 13x13 grid
     let cell = size as f32 / grid;
-    let (ox, oy) = (3.0, 1.0);
-    let place = [(0usize, 0.0, 0.0), (1, 6.0, 0.0), (2, 0.0, 8.0), (3, 6.0, 8.0)];
-    for (g, gx, gy) in place {
-        let red = g % 2 == 1;
-        for (r, row) in GLYPHS[g].iter().enumerate() {
-            for (c, ch) in row.chars().enumerate() {
-                if ch != '#' {
-                    continue;
-                }
-                let x0 = ((ox + gx + c as f32 + 0.07) * cell) as u32;
-                let y0 = ((oy + gy + r as f32 + 0.07) * cell) as u32;
-                let s = (cell * 0.86).max(1.0) as u32;
-                let col: [u8; 3] = if red { [0xcc, 0x22, 0x22] } else { [0xff, 0xff, 0xff] };
-                for y in y0..(y0 + s).min(size) {
-                    for x in x0..(x0 + s).min(size) {
-                        let i = ((y * size + x) * 4) as usize;
-                        px[i..i + 3].copy_from_slice(&col);
-                    }
-                }
+    let mut dots: Vec<(f32, f32, [u8; 3])> = vec![];
+    for (r, row) in M.iter().enumerate() {
+        for (c, ch) in row.chars().enumerate() {
+            if ch == '#' {
+                dots.push((2.0 + c as f32, 3.0 + r as f32, [0xff, 0xff, 0xff]));
+            }
+        }
+    }
+    for x in [8.0, 9.0] {
+        for y in 3..10 {
+            dots.push((x, y as f32, [0xcc, 0x22, 0x22]));
+        }
+    }
+    for (gx, gy, col) in dots {
+        let x0 = ((gx + 0.07) * cell) as u32;
+        let y0 = ((gy + 0.07) * cell) as u32;
+        let s = (cell * 0.86).max(1.0) as u32;
+        for y in y0..(y0 + s).min(size) {
+            for x in x0..(x0 + s).min(size) {
+                let i = ((y * size + x) * 4) as usize;
+                px[i..i + 3].copy_from_slice(&col);
             }
         }
     }
