@@ -1,5 +1,7 @@
 # CLAUDE.md
 
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
 Context for Claude Code sessions working on m3m0. Read this, then the doc in
 `docs/` for whatever you're touching.
 
@@ -21,6 +23,18 @@ Six features, all in scope (`docs/plan.md` has phases and status):
 6. flashcard review with RemNote's default scheduler, written back to RemNote
 
 Every decision and the reason for it: `docs/design.md`.
+
+## Data flow (read vs write)
+
+Reads: `kb::Kb::load` takes a SQLite backup-API snapshot of RemNote's local DB
+(`~/remnote/*/remnote.db`, picked with `:db`), so it's safe while RemNote runs.
+Writes never touch the DB: edits are staged as ops in `edit.rs` (undo/redo,
+`:diff` to inspect), and `:w` hands them to `commit.rs`, which sends them over
+the bridge. m3m0 is the server (`ws://127.0.0.1:47830`; it also serves
+`plugin/dist` on `:47831` for RemNote's "develop from localhost"); the plugin
+connects and applies ops through the RemNote SDK so RemNote owns sync stamps.
+Tmp ids for created rems are mapped to real ids on reply. Protocol and op
+table: `docs/bridge.md`. Review grades go the same way (`review` op).
 
 ## Layout
 
@@ -56,7 +70,19 @@ Every decision and the reason for it: `docs/design.md`.
 
 ```
 cargo build --release && ./target/release/m3m0
+./target/release/m3m0 --install                # icon + .desktop entry
 cd plugin && npm install && npm run build      # plugin/dist + PluginZip.zip
+```
+
+Checks (no lint config; plain `cargo clippy` if wanted):
+
+```
+cargo test                                     # unit tests (rich.rs, files.rs)
+cargo test rich::tests::typed_markup           # one test
+./target/release/m3m0 roundtrip                # must report 0 differ over the whole DB
+./target/release/m3m0 commit-test --keep       # write path on a scratch tree
+./target/release/m3m0 bridge-test --cleanup ID # delete that scratch tree
+cd plugin && npm run check-types               # tsc
 ```
 
 Dev env vars: `M3M0_DB` (db path), `M3M0_OPEN="FC2/Week 8"` (open a week),
