@@ -18,7 +18,7 @@ pub const HELP: &[Group] = &[
             ("tab / s-tab", "cycle focus: tree → notes → pdf"),
             ("ctrl-h / ctrl-l", "focus tree / notes"),
             ("ctrl-b", "show / hide the sidebar"),
-            ("ctrl-p", "show / hide the week's PDFs (focuses them)"),
+            ("ctrl-p", "show / hide the week's files pane (pdfs, quiz, notes...)"),
             ("ctrl-g", "graph view on / off"),
             ("ctrl-f", "cards view: yours vs claude's deck"),
             ("ctrl-a", "ask claude: chat panel about the open module"),
@@ -106,13 +106,16 @@ pub const HELP: &[Group] = &[
         ],
     },
     Group {
-        title: "pdf panel (ctrl-p)",
+        title: "files pane (ctrl-p)",
         keys: &[
             ("j / k", "scroll"),
             ("ctrl-d / ctrl-u", "half page"),
             ("J / K", "next / previous page"),
             ("gg / G", "top / bottom of the file"),
-            ("] / [", "next / previous PDF (week first, then module-wide)"),
+            ("o / enter", "list every file for this week and pick one (also :pdf)"),
+            ("] / [", "next / previous file in that list"),
+            ("a", "quiz: show / hide answers and explanations"),
+            ("(non-pdf)", "j/k scroll · J/K or ctrl-d/u page · gg/G ends"),
             ("+ / - / =", "zoom / reset"),
             ("< / >", "widen / narrow the panel"),
             ("h", "back to notes"),
@@ -170,12 +173,15 @@ pub const HELP: &[Group] = &[
     Group {
         title: "commands (:)",
         keys: &[
-            (":q", "quit"),
+            (":q", "quit (refuses with staged changes)"),
+            (":wq / :x", "commit, then quit"),
+            (":q!", "quit and drop staged changes"),
             (":w  :w!  :log  :e!", "see commit"),
             (":db", "pick which RemNote database to read"),
             (":reload / :e", "re-read RemNote (refuses with staged changes)"),
             (":zoom 130", "set zoom (also ctrl +/-)"),
             (":find", "same as ctrl-t"),
+            (":pdf", "open the files pane and list this week's files"),
             (":remnote", "start RemNote (the sync engine) if it isn't running"),
             (":remnote restart", "restart it so it loads the bridge plugin from m3m0"),
             (":help", "this reference"),
@@ -215,11 +221,26 @@ pub fn hint(ctx: &str) -> &'static str {
         "tree" => "j/k move · l open · h collapse · </> width · tab notes · ctrl-t find",
         "notes" => "i/a edit · o new · dd del · >> indent · gd ref · / find · ctrl-f cards · ctrl-g graph",
         "insert" => "esc save · enter new bullet · tab indent · [[ ref",
-        "pdf" => "j/k scroll · J/K page · ]/[ file · +/- zoom · h notes",
+        "pdf" => "o pick file · j/k scroll · J/K page · ]/[ file · a quiz answers · h notes",
         "graph" => "hjkl move · tab links · / find · enter open · L local · f module",
         "cards" => "h/l column · ]/[ gaps · enter open · gl link · s stage",
         "review" => "space reveal · 1 again 2 hard 3 good 4 easy · s skip · esc stop",
         "chat" => "enter send · shift-enter newline · ctrl-n new chat · esc notes",
         _ => "",
     }
+}
+
+/// Which section `?` opens on, for the focused pane.
+pub fn tab_for(ctx: &str) -> usize {
+    let want = match ctx {
+        "tree" => "tree",
+        "insert" => "insert",
+        "pdf" => "files",
+        "graph" => "graph",
+        "cards" => "cards",
+        "review" => "review",
+        "chat" => "chat",
+        _ => "notes: move",
+    };
+    HELP.iter().position(|g| g.title.starts_with(want)).unwrap_or(0)
 }

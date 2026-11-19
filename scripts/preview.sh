@@ -7,6 +7,9 @@
 set -euo pipefail
 out=${1:?outdir}; mkdir -p "$out"; rm -f "$out"/*.png
 cd "$(dirname "$0")/.."
+for attempt in 1 2; do
 env -u WAYLAND_DISPLAY M3M0_SHOTS="$out" M3M0_PREVIEW_POS="${M3M0_PREVIEW_POS:-60,60}" \
   M3M0_OPEN="${2:-}" M3M0_OPEN_ID="${M3M0_OPEN_ID:-}" M3M0_KEYS="${3:-}" timeout ${M3M0_TIMEOUT:-30} ./target/release/m3m0 >/dev/null 2>&1 || true
+[ -s "$out/09.png" ] && break
+done
 [ -s "$out/09.png" ] || echo "preview: no frame captured (display asleep or app failed)" >&2

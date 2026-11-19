@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 eframe = "0.31"
 hayro = "0.9"
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png"] }
 ratex-layout = "=0.1.16"
 ratex-parser = "=0.1.16"
 ratex-render = { version = "=0.1.16", features = ["embed-fonts"] }

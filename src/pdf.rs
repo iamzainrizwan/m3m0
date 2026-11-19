@@ -32,14 +32,16 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
         }
         if p.is_dir() {
             walk(&p, out);
-        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("pdf")) {
+        } else {
             out.push(p);
         }
     }
 }
 
-/// (this week's PDFs, module-wide PDFs) for a module + week.
-pub fn week_pdfs(module: &str, week: u32) -> (Vec<PathBuf>, Vec<PathBuf>) {
+/// (this week's files, module-wide PDFs) for a module + week. A week file is
+/// anything under a `week-NN` folder or named `week-NN*` (quiz JSON, answers,
+/// decks, slide text...), plus that week's lgt/sgt tutorial sheets.
+pub fn week_files(module: &str, week: u32) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let root = uni_dir().join(module.to_lowercase());
     let mut all = vec![];
     walk(&root, &mut all);
@@ -51,15 +53,35 @@ pub fn week_pdfs(module: &str, week: u32) -> (Vec<PathBuf>, Vec<PathBuf>) {
         let rel = p.strip_prefix(&root).unwrap_or(&p).to_path_buf();
         let in_week = rel.components().any(|c| c.as_os_str() == tag.as_str());
         let name = p.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let named = name == tag || name.starts_with(&format!("{tag}-")) || name.starts_with(&format!("{tag}_"));
         let is_tut = tut.iter().any(|t| name.starts_with(t.as_str()));
-        let any_week = rel.components().any(|c| c.as_os_str().to_string_lossy().starts_with("week-"));
-        if in_week || is_tut {
+        let any_week = rel.to_string_lossy().contains("week-");
+        let pdf = crate::files::kind(&p) == crate::files::FileKind::Pdf;
+        if in_week || named || is_tut {
             wk.push(p);
-        } else if !any_week && !rel.to_string_lossy().contains("tutorials") {
+        } else if pdf && !any_week && !rel.to_string_lossy().contains("tutorials") {
             module_wide.push(p);
         }
     }
-    wk.sort();
+    // the week's own notes first, then quiz, slides, tutorials, decks, the rest
+    let rank = |p: &PathBuf| -> (u8, PathBuf) {
+        let r = p.strip_prefix(&root).unwrap_or(p).to_string_lossy().to_string();
+        let k = if r.starts_with("weeks/") {
+            0
+        } else if r.contains("quizzes") {
+            1
+        } else if r.contains("slides") {
+            2
+        } else if r.contains("tutorials") {
+            3
+        } else if r.starts_with("revision") {
+            4
+        } else {
+            5
+        };
+        (k, p.clone())
+    };
+    wk.sort_by_key(rank);
     module_wide.sort();
     (wk, module_wide)
 }
@@ -139,6 +161,12 @@ pub struct Pdfs {
     pub scroll: f32,
     pub zoom: f32,
     pub key: Option<(String, String)>, // (module, week) the list was built for
+    /// non-PDF files: cached text, images, scroll, quiz answers shown
+    texts: HashMap<PathBuf, String>,
+    images: HashMap<PathBuf, Option<TextureHandle>>,
+    pub text_scroll: f32,
+    pub set_text_scroll: bool,
+    pub show_answers: bool,
 }
 
 impl Pdfs {
@@ -146,7 +174,7 @@ impl Pdfs {
         let (tx, wrx) = channel();
         let (wtx, rx) = channel();
         std::thread::spawn(move || worker(wrx, wtx, repaint));
-        Pdfs { tx, rx, files: vec![], n_week: 0, cur: 0, sizes: HashMap::new(), tex: HashMap::new(), asked: HashSet::new(), scroll: 0.0, zoom: 1.0, key: None }
+        Pdfs { tx, rx, files: vec![], n_week: 0, cur: 0, sizes: HashMap::new(), tex: HashMap::new(), asked: HashSet::new(), scroll: 0.0, zoom: 1.0, key: None, texts: HashMap::new(), images: HashMap::new(), text_scroll: 0.0, set_text_scroll: true, show_answers: false }
     }
 
     pub fn set_week(&mut self, module: &str, week_name: &str) {
@@ -155,7 +183,7 @@ impl Pdfs {
             return;
         }
         self.key = Some(key);
-        let (w, m) = week_number(week_name).map(|n| week_pdfs(module, n)).unwrap_or_default();
+        let (w, m) = week_number(week_name).map(|n| week_files(module, n)).unwrap_or_default();
         self.n_week = w.len();
         self.files = w.into_iter().chain(m).collect();
         self.cur = 0;
@@ -163,8 +191,25 @@ impl Pdfs {
         self.open_cur();
     }
 
+    pub fn current_kind(&self) -> Option<crate::files::FileKind> {
+        self.files.get(self.cur).map(|p| crate::files::kind(p))
+    }
+
+    /// Scroll a non-PDF file by `by` points (keys).
+    pub fn scroll_text(&mut self, by: f32) {
+        self.text_scroll = (self.text_scroll + by).max(0.0);
+        self.set_text_scroll = true;
+    }
+
     pub fn open_cur(&mut self) {
+        self.text_scroll = 0.0;
+        self.set_text_scroll = true;
+        self.show_answers = false;
         if let Some(p) = self.files.get(self.cur) {
+            if crate::files::kind(p) != crate::files::FileKind::Pdf {
+                self.texts.remove(p); // re-read: Claude may have edited it
+                return;
+            }
             if !self.sizes.contains_key(p) {
                 let _ = self.tx.send(Req::Open(p.clone()));
             }
@@ -194,8 +239,45 @@ impl Pdfs {
         }
     }
 
-    /// Draw the current file as a scrolling column of pages filling `ui`.
-    pub fn show(&mut self, ui: &mut egui::Ui) {
+    /// Draw the current file: PDFs as pages, everything else with its renderer.
+    pub fn show(&mut self, ui: &mut egui::Ui, kb: &crate::kb::Kb, math: &mut crate::math::Math) {
+        use crate::files::{self, FileKind};
+        let Some(path) = self.files.get(self.cur).cloned() else {
+            ui.label(egui::RichText::new("no files for this week in uni-git").color(crate::theme::COMMENT));
+            return;
+        };
+        let k = files::kind(&path);
+        if k == FileKind::Pdf {
+            return self.show_pdf(ui);
+        }
+        let mut sa = egui::ScrollArea::vertical().id_salt("file-scroll").auto_shrink(false);
+        if self.set_text_scroll {
+            sa = sa.vertical_scroll_offset(self.text_scroll);
+            self.set_text_scroll = false;
+        }
+        let (texts, images, show_answers) = (&mut self.texts, &mut self.images, self.show_answers);
+        let out = sa.show(ui, |ui| {
+            if k == FileKind::Image {
+                files::image(ui, images, &path);
+                return;
+            }
+            let src = texts.entry(path.clone()).or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_else(|e| format!("can't read: {e}"))).clone();
+            match k {
+                FileKind::Quiz => files::quiz(ui, kb, math, &path, &src, show_answers),
+                FileKind::Markdown => files::markdown(ui, kb, math, &src),
+                FileKind::Json => files::json(ui, &src),
+                _ => files::text(ui, &src),
+            }
+        });
+        // mouse-wheel scrolling feeds back so keys continue from there
+        self.text_scroll = out.state.offset.y;
+        let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
+        if self.text_scroll > max {
+            self.text_scroll = max;
+        }
+    }
+
+    fn show_pdf(&mut self, ui: &mut egui::Ui) {
         use crate::theme::*;
         use egui::{Rect, Sense, Vec2};
         self.poll(ui.ctx());

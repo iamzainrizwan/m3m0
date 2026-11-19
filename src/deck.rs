@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 #[derive(Clone)]
 pub struct DeckCard {
     pub section: String,
+    #[allow(dead_code)] // kept for debugging / future "copy raw" action
     pub text: String, // deck syntax with single-$ latex
     pub line: Line,
     pub key: String, // normalised front, the link key

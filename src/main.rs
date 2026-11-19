@@ -6,6 +6,7 @@ mod commit;
 mod config;
 mod deck;
 mod edit;
+mod files;
 mod editor;
 mod icon;
 mod kb;
@@ -106,7 +107,7 @@ enum Focus {
 
 enum Overlay {
     None,
-    Help { scroll: usize },
+    Help { scroll: usize, tab: usize },
     /// ctrl-t: jump to any week or rem by name
     Find { q: String, items: Vec<(String, String)>, cur: usize, for_q: Option<String> },
     Db { list: Vec<DbCandidate>, cur: usize },
@@ -115,6 +116,8 @@ enum Overlay {
     Diff { scroll: usize },
     Log { entries: Vec<commit::Entry>, cur: usize },
     Link(cards::LinkPick),
+    /// list of the week's PDFs (o in the pdf panel, :pdf)
+    Pdfs { cur: usize },
 }
 
 /// Actions that need the loaded data, queued during key handling (when the
@@ -180,6 +183,8 @@ struct App {
     deferred: Vec<Deferred>,
     chat: chat::Chat,
     review: Option<review::Review>,
+    quit_after_commit: bool,
+    quit_now: bool,
     last_search: Option<String>,
     links: std::collections::HashMap<String, String>,
 }
@@ -307,6 +312,8 @@ impl App {
             deferred: vec![],
             chat: chat::Chat::default(),
             review: None,
+            quit_after_commit: false,
+            quit_now: false,
             last_search: None,
             links: deck::load_links(),
         }
@@ -334,7 +341,7 @@ impl App {
     /// M3M0_OPEN="FC2/Week 8" opens a week on load (for previews).
     fn preselect(&mut self) {
         // M3M0_OPEN_ID=<rem id>: open any rem as the page (scratch-tree tests)
-        if let (Ok(id), Some(Ok(_))) = (std::env::var("M3M0_OPEN_ID"), &self.data) {
+        if let (Some(id), Some(Ok(_))) = (std::env::var("M3M0_OPEN_ID").ok().filter(|s| !s.is_empty()), &self.data) {
             self.open_week(id);
             return;
         }
@@ -530,7 +537,7 @@ impl App {
             (_, K::Ch('/')) => self.overlay = Overlay::Cmd("/".into()),
             (_, K::Ch('n')) if self.focus == Focus::Notes => self.deferred.push(Deferred::Search(1)),
             (_, K::Ch('N')) if self.focus == Focus::Notes => self.deferred.push(Deferred::Search(-1)),
-            (_, K::Ch('?')) => self.overlay = Overlay::Help { scroll: 0 },
+            (_, K::Ch('?')) => self.overlay = Overlay::Help { scroll: 0, tab: keys::tab_for(self.context()) },
             (_, K::Ctrl('t')) => self.overlay = Overlay::Find { q: String::new(), items: vec![], cur: 0, for_q: None },
             (_, K::Ch('G')) => self.jump(usize::MAX, trows.len(), nrows.len()),
             (_, K::Tab) => self.toggle_focus(),
@@ -745,6 +752,46 @@ impl App {
 
     /// Keys while the PDF panel has focus. Returns true if handled.
     fn pdf_key(&mut self, prefix: &str, k: K, n: usize) -> bool {
+        // non-PDF files scroll as text; a toggles quiz answers
+        if self.pdfs.current_kind().is_some_and(|x| x != files::FileKind::Pdf) {
+            let line = 60.0 * n as f32;
+            match (prefix, k) {
+                ("g", K::Ch('g')) => {
+                    self.pdfs.text_scroll = 0.0;
+                    self.pdfs.set_text_scroll = true;
+                    return true;
+                }
+                (_, K::Ch('g')) => {
+                    self.pending.push('g');
+                    return true;
+                }
+                (_, K::Ch('G')) => {
+                    self.pdfs.scroll_text(1.0e7);
+                    return true;
+                }
+                (_, K::Ch('j') | K::Down) => {
+                    self.pdfs.scroll_text(line);
+                    return true;
+                }
+                (_, K::Ch('k') | K::Up) => {
+                    self.pdfs.scroll_text(-line);
+                    return true;
+                }
+                (_, K::Ctrl('d') | K::Ch('J')) => {
+                    self.pdfs.scroll_text(400.0 * n as f32);
+                    return true;
+                }
+                (_, K::Ctrl('u') | K::Ch('K')) => {
+                    self.pdfs.scroll_text(-400.0 * n as f32);
+                    return true;
+                }
+                (_, K::Ch('a')) => {
+                    self.pdfs.show_answers = !self.pdfs.show_answers;
+                    return true;
+                }
+                _ => {}
+            }
+        }
         let line = 60.0 * n as f32;
         let half = 400.0 * n as f32;
         let heights = self.pdfs.page_heights(self.cfg.pdf_w * self.pdfs.zoom);
@@ -778,6 +825,7 @@ impl App {
             (_, K::Ch('-')) => self.pdfs.zoom = (self.pdfs.zoom / 1.15).max(0.4),
             (_, K::Ch('=')) => self.pdfs.zoom = 1.0,
             (_, K::Ch('h') | K::Left) => self.focus = Focus::Notes,
+            (_, K::Ch('o') | K::Enter) => self.overlay = Overlay::Pdfs { cur: self.pdfs.cur },
             (_, K::Ch('<')) => self.cfg.pdf_w = (self.cfg.pdf_w + 40.0 * n as f32).min(1400.0),
             (_, K::Ch('>')) => self.cfg.pdf_w = (self.cfg.pdf_w - 40.0 * n as f32).max(280.0),
             _ => return false,
@@ -869,7 +917,19 @@ impl App {
 
     fn handle_overlay(&mut self, ctx: &egui::Context, k: K) {
         match &mut self.overlay {
-            Overlay::Help { scroll } => match k {
+            Overlay::Help { scroll, tab } => match k {
+                K::Ch('l') | K::Right | K::Tab => {
+                    *tab = (*tab + 1) % keys::HELP.len();
+                    *scroll = 0;
+                }
+                K::Ch('h') | K::Left | K::ShiftTab => {
+                    *tab = (*tab + keys::HELP.len() - 1) % keys::HELP.len();
+                    *scroll = 0;
+                }
+                K::Ch(c @ '1'..='9') => {
+                    *tab = ((c as u8 - b'1') as usize).min(keys::HELP.len() - 1);
+                    *scroll = 0;
+                }
                 K::Ch('j') | K::Down => *scroll += 1,
                 K::Ch('k') | K::Up => *scroll = scroll.saturating_sub(1),
                 K::Ctrl('d') => *scroll += 12,
@@ -964,6 +1024,25 @@ impl App {
                 K::Esc | K::Ch('q') => self.overlay = Overlay::None,
                 _ => {}
             },
+            Overlay::Pdfs { cur } => match k {
+                K::Ch('j') | K::Down | K::Ctrl('n') => *cur = (*cur + 1).min(self.pdfs.files.len().saturating_sub(1)),
+                K::Ch('k') | K::Up | K::Ctrl('p') => *cur = cur.saturating_sub(1),
+                K::Ch('g') => *cur = 0,
+                K::Ch('G') => *cur = self.pdfs.files.len().saturating_sub(1),
+                K::Enter | K::Ch('l') => {
+                    let c = *cur;
+                    self.overlay = Overlay::None;
+                    if c < self.pdfs.files.len() {
+                        self.pdfs.cur = c;
+                        self.pdfs.open_cur();
+                        self.cfg.pdf_open = true;
+                        self.cfg.chat_open = false;
+                        self.focus = Focus::Pdf;
+                    }
+                }
+                K::Esc | K::Ch('q') | K::Ch('o') => self.overlay = Overlay::None,
+                _ => {}
+            },
             Overlay::None => {}
         }
     }
@@ -1054,6 +1133,12 @@ impl App {
                 self.week = Some(r.clone());
             }
         }
+        if self.quit_after_commit && out.err.is_none() {
+            self.changes = edit::Changes::default();
+            self.quit_after_commit = false;
+            self.quit_now = true;
+        }
+        self.quit_after_commit = false;
         self.msg = Some(match out.err {
             None => format!("committed {} changes to RemNote", out.done),
             Some(e) => format!("committed {} of {}; stopped: {e} (the rest stay staged)", out.done, ops.len()),
@@ -1090,7 +1175,15 @@ impl App {
         }
         let mut it = cmd.split_whitespace();
         match (it.next(), it.next()) {
-            (Some("q" | "quit" | "q!" | "wq"), _) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            (Some("q!"), _) => {
+                self.changes = edit::Changes::default();
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            (Some("q" | "quit"), _) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            (Some("wq" | "x"), _) => {
+                self.quit_after_commit = true;
+                self.deferred.push(Deferred::Commit);
+            }
             (Some("db"), _) => {
                 let list = kb::find_dbs();
                 let cur = self
@@ -1125,12 +1218,18 @@ impl App {
             }
             (Some("w!"), _) => self.deferred.push(Deferred::Commit),
             (Some("log"), _) => self.overlay = Overlay::Log { entries: commit::read_log(), cur: 0 },
-            (Some("help" | "h"), _) => self.overlay = Overlay::Help { scroll: 0 },
+            (Some("help" | "h"), _) => self.overlay = Overlay::Help { scroll: 0, tab: 0 },
             (Some("review"), arg) => {
                 if let Some(Ok(d)) = &self.data {
                     let _ = d;
                 }
                 self.deferred.push(Deferred::Review(arg.map(str::to_owned)));
+            }
+            (Some("pdf" | "pdfs"), _) => {
+                self.cfg.chat_open = false;
+                self.cfg.pdf_open = true;
+                self.focus = Focus::Pdf;
+                self.overlay = Overlay::Pdfs { cur: self.pdfs.cur };
             }
             (Some("remnote"), arg) => {
                 let restart = arg == Some("restart");
@@ -1260,12 +1359,20 @@ impl eframe::App for App {
                 }
             }
         }
+        // don't lose staged edits: closing with changes staged asks first
+        if ctx.input(|i| i.viewport().close_requested()) && !self.changes.ops.is_empty() {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.msg = Some(format!("{} staged changes: :w to commit, :wq to commit and quit, :q! to quit and drop them", self.changes.ops.len()));
+        }
         if let Some(rx) = &self.committing {
             if let Ok((out, ops)) = rx.try_recv() {
                 self.committing = None;
                 self.finish_commit(out, ops);
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        if self.quit_now {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
         }
         edge_resize(ctx);
 
@@ -1389,7 +1496,7 @@ impl App {
                 (None, Some(Err(_))) => "load failed".into(),
                 (None, None) => "loading…".into(),
             };
-            p.text(Pos2::new(pill.right() + 14.0, r.center().y), Align2::LEFT_CENTER, left, f.clone(), FG_DIM);
+
             let db = match &self.data {
                 Some(Ok(d)) => d.db.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 _ => String::new(),
@@ -1400,12 +1507,16 @@ impl App {
             } else if self.bridge.is_online() {
                 "bridge online".to_owned()
             } else if let Some(e) = err {
-                format!("bridge: {e}")
+                if e.contains("busy") { "bridge: port busy (another m3m0?)".to_owned() } else { format!("bridge: {}", e.chars().take(40).collect::<String>()) }
             } else {
                 "bridge offline".to_owned()
             };
             let right = format!("{}  {br}  ·  {db}  {:.0}%  ? keys", self.pending, ctx.zoom_factor() * 100.0);
-            p.text(Pos2::new(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, right, f, COMMENT);
+            let rr = p.text(Pos2::new(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, right, f.clone(), COMMENT);
+            // left text never runs under the right-hand status
+            let clip = Rect::from_min_max(Pos2::new(pill.right() + 14.0, r.top()), Pos2::new(rr.left() - 16.0, r.bottom()));
+            p.with_clip_rect(clip).text(Pos2::new(pill.right() + 14.0, r.center().y), Align2::LEFT_CENTER, left, f.clone(), FG_DIM);
+
         });
     }
 
@@ -1648,14 +1759,15 @@ impl App {
                 // file switcher: [ / ] in the panel
                 let n = self.pdfs.files.len();
                 ui.horizontal(|ui| {
-                    let name = self.pdfs.files.get(self.pdfs.cur).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "no pdfs".into());
+                    let name = self.pdfs.files.get(self.pdfs.cur).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "no files".into());
                     let scope = if self.pdfs.cur < self.pdfs.n_week { "week" } else { "module" };
-                    ui.label(RichText::new(format!("{} ", if focused { "\u{f15c}" } else { "\u{f1c1}" })).color(if focused { RED_BRIGHT } else { FG_DIM }));
+                    let ic = self.pdfs.current_kind().map(files::icon).unwrap_or("\u{f15c}");
+                    ui.label(RichText::new(format!("{ic} ")).color(if focused { RED_BRIGHT } else { FG_DIM }));
                     ui.add(egui::Label::new(RichText::new(name).color(FG_BRIGHT).size(13.0)).truncate());
                     ui.label(RichText::new(format!("  {}/{} · {scope}", (self.pdfs.cur + 1).min(n), n)).color(COMMENT).size(12.0));
                 });
                 ui.add_space(4.0);
-                self.pdfs.show(ui);
+                self.pdfs.show(ui, &d.kb, &mut self.math);
             });
         if let Some(ir) = panel {
             let pr = ir.response.rect;
@@ -1884,45 +1996,74 @@ impl App {
         }
         let screen = ctx.screen_rect();
         match &self.overlay {
-            Overlay::Help { scroll } => {
-                let scroll = *scroll;
-                let size = Vec2::new((screen.width() - 60.0).min(1240.0), screen.height() - 60.0);
-                modal(ctx, "keys  ·  everything m3m0 does from the keyboard", screen, size, |ui| {
-                    let colw = (size.x - 36.0 - 24.0) / 2.0;
-                    egui::ScrollArea::vertical().max_height(size.y - 100.0).vertical_scroll_offset(scroll as f32 * 22.0).show(ui, |ui| {
-                        ui.horizontal_top(|ui| {
-                            let half = keys::HELP.iter().map(|g| g.keys.len() + 2).sum::<usize>() / 2;
-                            let mut acc = 0;
-                            let split = keys::HELP.iter().position(|g| {
-                                acc += g.keys.len() + 2;
-                                acc >= half
-                            }).map(|i| i + 1).unwrap_or(keys::HELP.len());
-                            for (ci, groups) in [&keys::HELP[..split], &keys::HELP[split..]].into_iter().enumerate() {
-                                ui.vertical(|ui| {
-                                    ui.set_width(colw);
-                                    for g in groups {
-                                        ui.label(RichText::new(g.title).color(RED).family(bold()).size(13.5));
-                                        ui.add_space(3.0);
-                                        for (k, what) in g.keys {
-                                            ui.horizontal_top(|ui| {
-                                                ui.allocate_ui_with_layout(Vec2::new(colw * 0.36, 18.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                                                    ui.set_width(colw * 0.36);
-                                                    ui.add(egui::Label::new(RichText::new(*k).color(FG_BRIGHT).size(13.0)).truncate());
-                                                });
-                                                ui.add(egui::Label::new(RichText::new(*what).color(FG_DIM).size(13.0)).wrap());
-                                            });
-                                        }
-                                        ui.add_space(12.0);
-                                    }
-                                });
-                                if ci == 0 {
-                                    ui.add_space(24.0);
-                                }
-                            }
-                        });
+            Overlay::Help { scroll, tab } => {
+                let (scroll, tab) = (*scroll, *tab);
+                let g = &keys::HELP[tab];
+                let size = Vec2::new((screen.width() - 80.0).min(900.0), (screen.height() - 80.0).min(160.0 + g.keys.len() as f32 * 30.0 + 90.0).max(360.0));
+                modal(ctx, "keys", screen, size, |ui| {
+                    // section tabs
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 6.0);
+                        for (i, s) in keys::HELP.iter().enumerate() {
+                            let sel = i == tab;
+                            let t = RichText::new(format!(" {} ", s.title)).size(12.5).color(if sel { BG } else { FG_DIM });
+                            let t = if sel { t.background_color(RED) } else { t.background_color(GREY0) };
+                            ui.label(t);
+                        }
                     });
-                    ui.add_space(6.0);
-                    ui.label(RichText::new("j/k ctrl-d/u scroll · esc close · while typing a prefix (g z d > < or a count) a hint box shows what can follow").color(COMMENT).size(12.0));
+                    ui.add_space(14.0);
+                    ui.label(RichText::new(g.title).color(RED_BRIGHT).family(bold()).size(17.0));
+                    ui.add_space(8.0);
+                    let keyw = 250.0;
+                    egui::ScrollArea::vertical().max_height(size.y - 170.0).vertical_scroll_offset(scroll as f32 * 30.0).show(ui, |ui| {
+                        for (k, what) in g.keys {
+                            ui.horizontal_top(|ui| {
+                                ui.allocate_ui_with_layout(Vec2::new(keyw, 24.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                    ui.set_width(keyw);
+                                    ui.add(egui::Label::new(RichText::new(*k).color(FG_BRIGHT).size(15.0)).truncate());
+                                });
+                                ui.add(egui::Label::new(RichText::new(*what).color(FG).size(15.0)).wrap());
+                            });
+                            ui.add_space(6.0);
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(RichText::new(format!("h/l section ({}/{}) · 1-9 jump · j/k scroll · esc close · typing a prefix (g z d > <) shows what can follow", tab + 1, keys::HELP.len())).color(COMMENT).size(12.0));
+                });
+            }
+            Overlay::Pdfs { cur } => {
+                let cur = *cur;
+                let files = self.pdfs.files.clone();
+                let n_week = self.pdfs.n_week;
+                let open = self.pdfs.cur;
+                let root = pdf::uni_dir();
+                let h = (screen.height() - 80.0).min(120.0 + files.len() as f32 * 26.0 + 60.0);
+                modal(ctx, "files for this week", screen, Vec2::new(820.0, h), |ui| {
+                    if files.is_empty() {
+                        ui.label(RichText::new("no files found: open a week (anything under a week-NN folder or named week-NN in uni-git/<module>)").color(COMMENT));
+                    }
+                    egui::ScrollArea::vertical().max_height(h - 110.0).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for (i, f) in files.iter().enumerate() {
+                            if i == 0 || i == n_week {
+                                ui.add_space(if i == 0 { 0.0 } else { 10.0 });
+                                ui.label(RichText::new(if i < n_week { "this week" } else { "module-wide pdfs" }).color(RED).family(bold()).size(13.0));
+                                ui.add_space(3.0);
+                            }
+                            let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                            let rel = f.parent().and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.display().to_string()).unwrap_or_default();
+                            let r = row(ui, ("pdfpick", i), i == cur, true, 0.0, |ui| {
+                                ui.label(RichText::new(format!("{} ", files::icon(files::kind(f)))).color(if i == open { RED_BRIGHT } else { COMMENT }).size(13.0));
+                                ui.add(egui::Label::new(RichText::new(name).color(if i == cur { FG_BRIGHT } else { FG }).size(13.5)).truncate());
+                                ui.label(RichText::new(format!("   {rel}")).color(COMMENT).size(11.5));
+                            });
+                            if i == cur {
+                                r.scroll_to_me(None);
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("j/k move · enter open · esc close · ] / [ in the panel step through these in order").color(COMMENT).size(12.0));
                 });
             }
             Overlay::Find { q, items, cur, .. } => {
