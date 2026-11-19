@@ -63,7 +63,14 @@ TOO_EARLY 0.01, RESET 3.
      Pending: confirm it reviews as a multi-line card on the phone.
 4. ✓ `updateCardRepetitionStatus(GOOD)` adds a history entry
 5. ✓ every written field has fresh `,u` stamps; the tree reached the phone
-6. pending: syncing while hidden; starting hidden
+6. ✓ keeps syncing with RemNote minimised/on another workspace (the write
+   reached the phone without touching RemNote)
+
+Gotcha: RemNote fetches the plugin code from m3m0's HTTP server **at its own
+startup**. If RemNote starts while m3m0 isn't serving, the plugin is listed but
+never runs. So m3m0 must start its server first, then launch RemNote (hidden),
+or restart an already-running RemNote. Background windows also throttle
+timers to ~1/min, so a reconnect can take up to a minute.
 
 Side finding: RemNote's daily backup job zips and unlinks every entry in
 `<kb>/backups/` and errors on directories, so never put anything there.

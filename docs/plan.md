@@ -4,7 +4,7 @@ Build hours are Claude's; "you" = Zain's testing time. Commit + push after each.
 
 | # | phase | status |
 |---|---|---|
-| 0 | spikes: plugin bridge, KaTeX look, PDF renderer (~3h, you 0.5h) | math ✓ RaTeX, pdf ✓ hayro, bridge ✓ (5/6, see bridge.md); left: `>>>` check, hidden sync |
+| 0 | spikes: plugin bridge, KaTeX look, PDF renderer (~3h, you 0.5h) | math ✓ RaTeX, pdf ✓ hayro, bridge ✓ 6/6 (see bridge.md); left: `>>>` review check on the phone |
 | 1 | skeleton + read model: rice theme, KB port, module/week tree (~3h) | ✓ plus boot anim, vim nav, titlebar, icon, :db |
 | 2 | outliner editor: vim modes, indent, collapse, all syntax, `[[ref]]` autocomplete, KaTeX inline (~8h, you 1h) | |
 | 3 | changesets: staged diff, commit via bridge, log, revert, backup, commit wins (~5h) | |
@@ -14,5 +14,5 @@ Build hours are Claude's; "you" = Zain's testing time. Commit + push after each.
 | 7 | chat panel: `claude -p`, module context, edits only `revision/` (~3h) | |
 | 8 | review: RemNote default scheduler from history, write back (~5h, you 1h) | |
 
-Also pending: start RemNote hidden on launch/commit and wait for sync; rem →
+Also pending: on launch, start the plugin server first, then start (or restart) RemNote hidden, and wait for sync; rem →
 uni-git mapping override file.
