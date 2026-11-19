@@ -19,6 +19,18 @@ pub enum Ev {
     Tool(String), // a tool being used, for the status line
 }
 
+/// The claude CLI. Launched from the app grid, GNOME doesn't give us the
+/// shell's PATH (no ~/.local/bin), so look in the usual install spots too.
+pub fn claude_bin() -> std::path::PathBuf {
+    let home = crate::kb::home();
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    for d in [".local/bin", ".claude/local", ".npm-global/bin", ".bun/bin", "bin"] {
+        dirs.push(home.join(d));
+    }
+    dirs.extend(["/usr/local/bin", "/usr/bin"].map(std::path::PathBuf::from));
+    dirs.into_iter().map(|d| d.join("claude")).find(|p| p.is_file()).unwrap_or_else(|| "claude".into())
+}
+
 pub struct Msg {
     pub user: bool,
     pub text: String,
@@ -68,7 +80,7 @@ impl Chat {
              write maths as inline LaTeX between single dollar signs. You may edit only files under revision/ (Claude's own decks), \
              and only when asked; never touch anything else."
         );
-        let mut cmd = Command::new("claude");
+        let mut cmd = Command::new(claude_bin());
         cmd.current_dir(&dir)
             .args(["-p", "--output-format", "stream-json", "--verbose", "--include-partial-messages"])
             .args(["--setting-sources", ""])
@@ -90,7 +102,7 @@ impl Chat {
             let mut child = match cmd.spawn() {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = tx.send(Ev::Done { session: None, error: Some(format!("couldn't run claude: {e}")) });
+                    let _ = tx.send(Ev::Done { session: None, error: Some(format!("couldn't run claude ({}): {e}", claude_bin().display())) });
                     repaint();
                     return;
                 }
