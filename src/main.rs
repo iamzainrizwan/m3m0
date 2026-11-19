@@ -33,6 +33,9 @@ fn main() -> eframe::Result {
     if args.get(1).map(String::as_str) == Some("commit-test") {
         std::process::exit(commit_test(args.iter().any(|a| a == "--keep")));
     }
+    if args.get(1).map(String::as_str) == Some("pairs") {
+        std::process::exit(pairs_dump());
+    }
     if args.get(1).map(String::as_str) == Some("roundtrip") {
         std::process::exit(roundtrip());
     }
@@ -2401,6 +2404,36 @@ impl App {
         }
         self.msg = Some(format!("staged {n} {} from {} ({skipped} skipped): :diff to review, :w to send", plural(n, "edit"), path.display()));
     }
+}
+
+/// `m3m0 pairs`: JSON of every module week's own cards, Claude deck cards
+/// (with their link keys) and the current pairing, for bulk-linking scripts.
+fn pairs_dump() -> i32 {
+    let Some(db) = kb::resolve_db(Config::load().db.as_deref()) else { return 2 };
+    let Ok(kb) = Kb::load(&db) else { return 2 };
+    let links = deck::load_links();
+    let name = |id: &str| kb.name(id);
+    let mut out = vec![];
+    for m in kb.children(None) {
+        for w in kb.children(Some(m)) {
+            let Some(n) = pdf::week_number(&kb.name(w)) else { continue };
+            let files = deck::deck_files(&kb.name(m), n);
+            if files.is_empty() {
+                continue;
+            }
+            let theirs: Vec<deck::DeckCard> = files.iter().flat_map(|f| deck::parse(f)).collect();
+            let mine = deck::my_cards(&kb, w);
+            let pm = deck::pair(&kb, &mine, &theirs, &links);
+            let text = |l: &rich::Line| rich::line_to_text(l, &name, &mut rich::Side::default());
+            out.push(serde_json::json!({
+                "module": kb.name(m), "week": n,
+                "mine": pm.mine.iter().map(|(id, p)| serde_json::json!({"id": id, "text": text(&kb.line_of(id)), "pair": p.map(|(i, e)| serde_json::json!([i, e]))})).collect::<Vec<_>>(),
+                "theirs": theirs.iter().map(|c| serde_json::json!({"key": c.key, "text": c.text, "section": c.section})).collect::<Vec<_>>(),
+            }));
+        }
+    }
+    println!("{}", serde_json::Value::Array(out));
+    0
 }
 
 /// `m3m0 roundtrip`: every rem -> editable text -> back, compared with the DB.
