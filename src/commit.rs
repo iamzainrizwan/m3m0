@@ -76,9 +76,45 @@ fn fields(l: &LineJson, m: &HashMap<String, String>) -> Value {
     f
 }
 
+/// Refs typed as `[[name|alias]]` carry `aliasText`: create the alias (or reuse
+/// an equal one, getOrCreateAliasWithText) and point the ref at it by `aliasId`.
+fn resolve_aliases(bridge: &Bridge, v: &mut Value, cache: &mut HashMap<(String, String), String>) -> Result<(), String> {
+    match v {
+        Value::Array(a) => a.iter_mut().try_for_each(|x| resolve_aliases(bridge, x, cache)),
+        Value::Object(o) if o.get("i").and_then(Value::as_str) == Some("q") => {
+            let (Some(rem), Some(text)) = (o.get("_id").and_then(Value::as_str), o.get("aliasText").and_then(Value::as_str)) else { return Ok(()) };
+            let key = (rem.to_owned(), text.to_owned());
+            let id = match cache.get(&key) {
+                Some(id) => id.clone(),
+                None => {
+                    let res = bridge.call("alias", json!({ "rem": rem, "text": [text] }))?;
+                    let id = res["id"].as_str().ok_or("alias returned no id")?.to_owned();
+                    cache.insert(key, id.clone());
+                    id
+                }
+            };
+            o.remove("aliasText");
+            o.insert("aliasId".into(), json!(id));
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// create / update with set-fields, creating any typed aliases first.
+fn send(bridge: &Bridge, op: &str, mut f: Value, cache: &mut HashMap<(String, String), String>) -> Result<Value, String> {
+    for k in ["text", "back"] {
+        if let Some(v) = f.get_mut(k) {
+            resolve_aliases(bridge, v, cache)?;
+        }
+    }
+    bridge.call(op, f)
+}
+
 /// Run the ops. `children` gives a rem's children (for marking >>> items).
 pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>) -> Outcome {
     let mut idmap: HashMap<String, String> = HashMap::new();
+    let mut aliases = HashMap::new();
     let real = |m: &HashMap<String, String>, id: &str| m.get(id).cloned().unwrap_or_else(|| id.to_owned());
     for (i, op) in ops.iter().enumerate() {
         let r: Result<(), String> = (|| {
@@ -100,7 +136,7 @@ pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>)
                         if card_item {
                             f["cardItem"] = json!(true);
                         }
-                        let res = bridge.call("create", f)?;
+                        let res = send(bridge, "create", f, &mut aliases)?;
                         let new = res["id"].as_str().ok_or("create returned no id")?.to_owned();
                         idmap.insert(old.clone(), new);
                         if k == 0 {
@@ -112,7 +148,7 @@ pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>)
                     let mut f = fields(line, &idmap);
                     f["parent"] = json!(real(&idmap, parent));
                     f["position"] = json!(pos);
-                    let res = bridge.call("create", f)?;
+                    let res = send(bridge, "create", f, &mut aliases)?;
                     let new = res["id"].as_str().ok_or("create returned no id")?.to_owned();
                     idmap.insert(id.clone(), new);
                 }
@@ -123,7 +159,7 @@ pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>)
                         f["back"] = json!([]);
                     }
                     f["rem"] = json!(real(&idmap, id));
-                    bridge.call("update", f)?;
+                    send(bridge, "update", f, &mut aliases)?;
                     if after.kind == "multiline" && before.kind != "multiline" {
                         for c in children.get(id).into_iter().flatten() {
                             bridge.call("update", json!({ "rem": real(&idmap, c), "cardItem": true }))?;

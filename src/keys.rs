@@ -91,6 +91,7 @@ pub const HELP: &[Group] = &[
             ("$x^2$", "inline LaTeX (rendered like KaTeX)"),
             ("**bold** *italic* `code`", "styles"),
             ("[[name]]", "reference to another rem"),
+            ("[[name|shown]]", "reference that reads differently ([[Linear Program|LP]] shows LP; saved as a RemNote alias)"),
             ("# / ## / ###", "heading 1-3"),
             ("```code", "code block (only existing code blocks can be edited)"),
         ],

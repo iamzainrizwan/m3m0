@@ -28,6 +28,7 @@ m3m0 → plugin: `{"id": N, "op": "...", ...}`; reply
 | `update` | `rem`, set-fields | set-fields on an existing rem |
 | `delete` | `rem` | `rem.remove()` |
 | `get` | `rem` | `{text, back, parent, type, cards[{id,type,next,history}]}` |
+| `alias` | `rem`, `text` | `rem.getOrCreateAliasWithText(text)`; `{id}` (for `[[name\|alias]]` refs, sent as `aliasId`) |
 | `review` | `card`, `score` | `card.updateCardRepetitionStatus(score)`; `{next, history}` |
 
 set-fields (all optional): `parent` (+`position`) → `setParent`; `text` →

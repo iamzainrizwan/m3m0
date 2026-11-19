@@ -89,8 +89,23 @@ impl Kb {
                 q.insert(r.0, v);
             }
         }
+        // alias rems (`[[name|alias]]` targets) are children of their rem but,
+        // as in RemNote, never shown as bullets; every ref through one names it
+        let mut aliases = std::collections::HashSet::new();
+        for d in q.values() {
+            for side in ["key", "value"] {
+                for p in d.get(side).and_then(Value::as_array).into_iter().flatten() {
+                    if let Some(a) = p.get("aliasId").and_then(Value::as_str) {
+                        aliases.insert(a.to_owned());
+                    }
+                }
+            }
+        }
         let mut kids: HashMap<Option<String>, Vec<String>> = HashMap::new();
         for (i, d) in &q {
+            if aliases.contains(i) {
+                continue;
+            }
             let p = d.get("parent").and_then(Value::as_str).map(str::to_owned);
             kids.entry(p).or_default().push(i.clone());
         }
@@ -135,9 +150,14 @@ impl Kb {
             match p.get("i").and_then(Value::as_str) {
                 Some("x") => out.push_str(&format!("${t}$")),
                 Some("q") => {
+                    // through an alias: the alias's text (its rem, or a not-yet-created one)
+                    let alias = p.get("aliasText").and_then(Value::as_str).map(str::to_owned).or_else(|| {
+                        let a = p.get("aliasId").and_then(Value::as_str)?;
+                        Some(self.text(self.q.get(a)?.get("key"), md)).filter(|t| !t.trim().is_empty())
+                    });
                     let id = p.get("_id").and_then(Value::as_str).unwrap_or("");
                     out.push_str("[[");
-                    out.push_str(&self.text(self.q.get(id).and_then(|d| d.get("key")), md));
+                    out.push_str(&alias.unwrap_or_else(|| self.text(self.q.get(id).and_then(|d| d.get("key")), md)));
                     out.push_str("]]");
                 }
                 Some("i") => out.push_str("[image]"),
@@ -247,9 +267,17 @@ impl Kb {
 
     /// Rem id for a [[name]]: exact name match, preferring rems under `near`'s module.
     pub fn resolve(&self, name: &str, near: Option<&str>) -> Option<String> {
-        let hits: Vec<&String> = self.q.keys().filter(|k| self.name(k) == name).collect();
+        let hits: Vec<&String> = self.q.keys().filter(|k| self.name(k) == name && !self.is_hidden(k)).collect();
         let module = near.and_then(|n| self.module_of(n));
         hits.iter().find(|h| module.is_some() && self.module_of(h) == module).or(hits.first()).map(|s| (*s).clone())
+    }
+
+    /// Not in the tree (alias rems): not a [[ref]] target by name either.
+    pub fn is_hidden(&self, i: &str) -> bool {
+        match self.q.get(i).and_then(|d| d.get("parent")).and_then(Value::as_str) {
+            Some(p) => !self.children(Some(p)).iter().any(|k| k == i),
+            None => false,
+        }
     }
 
     pub fn module_of(&self, i: &str) -> Option<String> {

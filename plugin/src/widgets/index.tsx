@@ -45,6 +45,12 @@ async function apply(plugin: ReactRNPlugin, m: Msg): Promise<any> {
         cards: cards.map((c) => ({ id: c._id, type: c.type, next: c.nextRepetitionTime, history: c.repetitionHistory })),
       };
     }
+    case 'alias': {
+      // [[name|alias]] refs: an alias rem of m.rem with text m.text (reused if equal)
+      const a = await (await rem(plugin, m.rem)).getOrCreateAliasWithText(m.text as RichTextInterface);
+      if (!a) throw new Error(`no alias for ${m.rem}`);
+      return { id: a._id };
+    }
     case 'review': {
       const c = await plugin.card.findOne(m.card);
       if (!c) throw new Error(`no card ${m.card}`);

@@ -439,7 +439,7 @@ fn complete(kb: &Kb, q: &str, near: &str) -> Vec<(String, String)> {
     let mut hits: Vec<(u8, bool, usize, String, String)> = vec![];
     for id in kb.q.keys() {
         let name = kb.name(id).replace(['[', ']'], "").replace('\n', " ");
-        if name.is_empty() || name.len() > 120 || id == near {
+        if name.is_empty() || name.len() > 120 || id == near || kb.is_hidden(id) {
             continue;
         }
         let nl = name.to_lowercase();

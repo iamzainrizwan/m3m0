@@ -115,3 +115,14 @@ name; `Week N - …` maps to `week-NN`. An override file covers mismatches.
 and saves the pick. If RemNote moves storage, read how its app JS opens the DB
 (that's how remnote.py's notes were reverse-read) and add the path to
 `kb::find_dbs`.
+
+## aliased refs
+
+`[[Linear Program|LP]]` points at "Linear Program" but reads "LP" ("so a
+reference to LP doesn't expand to Linear Programming"). Stored the RemNote
+way: the ref carries `aliasId`, an alias rem under the target, so it reads the
+same on the phone. Typed in m3m0, the ref holds `aliasText` until `:w`, which
+calls the bridge's `alias` op (`getOrCreateAliasWithText`, reuses an equal
+alias). Alias rems are hidden from the tree and from `[[` name lookup; m3m0
+spots them as the rems some ref names by `aliasId` (RemNote's own alias
+marker in the DB hasn't been read yet).

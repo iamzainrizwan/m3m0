@@ -6,6 +6,8 @@
 //!   `# heading`   `front :: back`   `front ;; back`   `front >> back`
 //!   `front <> back`   `front >>>` (children are the items)   `front >>A)` (mcq)
 //!   inline: `**bold**` `*italic*` `` `code` `` `$latex$` `{{cloze}}` `[[ref]]`
+//!   `[[ref|shown]]` (a ref through one of the rem's aliases, so it reads "LP"
+//!   but points at "Linear Program"; RemNote stores it as `aliasId`)
 //!   anything we don't model (images, plugin objects) shows as `![image](N)` and
 //!   comes back verbatim, so editing a line never loses data.
 
@@ -148,13 +150,33 @@ pub fn to_rt(spans: &[Span]) -> Value {
     Value::Array(out)
 }
 
+/// The text a ref shows: its alias when it goes through one, else the rem's name.
+/// `aliasText` marks an alias typed in m3m0 that the commit still has to create.
+pub fn ref_label(id: &str, extra: &Map<String, Value>, name: &dyn Fn(&str) -> String) -> String {
+    if let Some(t) = extra.get("aliasText").and_then(Value::as_str) {
+        return t.to_owned();
+    }
+    if let Some(a) = extra.get("aliasId").and_then(Value::as_str) {
+        let n = name(a);
+        if !n.is_empty() {
+            return n;
+        }
+    }
+    name(id)
+}
+
+/// Whether a ref shows an alias rather than the rem's own name.
+pub fn has_alias(extra: &Map<String, Value>, name: &dyn Fn(&str) -> String) -> bool {
+    extra.contains_key("aliasText") || extra.get("aliasId").and_then(Value::as_str).is_some_and(|a| !name(a).is_empty())
+}
+
 pub fn plain(spans: &[Span], name: &dyn Fn(&str) -> String) -> String {
     spans
         .iter()
         .map(|s| match s {
             Span::Text { t, .. } => t.clone(),
             Span::Latex { tex, .. } => tex.clone(),
-            Span::Ref { id, .. } => name(id),
+            Span::Ref { id, extra, .. } => ref_label(id, extra, name),
             Span::Opaque(_) => String::new(),
         })
         .collect()
@@ -167,7 +189,7 @@ pub fn readable(spans: &[Span], name: &dyn Fn(&str) -> String) -> String {
         .iter()
         .map(|s| match s {
             Span::Latex { tex, .. } => tex_unicode(tex),
-            Span::Ref { id, .. } => name(id),
+            Span::Ref { id, extra, .. } => ref_label(id, extra, name),
             _ => plain(std::slice::from_ref(s), name),
         })
         .collect()
@@ -317,7 +339,8 @@ pub struct Side {
     pub clozes: HashMap<String, String>, // cloze text -> id, from the original line
     /// extra fields on text we don't model (sup, sub, colours): `⟪N:text⟫` -> styled[N]
     pub styled: Vec<Map<String, Value>>,
-    /// extra fields on latex / refs (block, latexClozes, aliasId ...), by tex / id
+    /// extra fields on latex / refs (block, latexClozes, aliasId ...), by tex /
+    /// the ref token's inner text (`name` or `name|alias`)
     pub latex_extras: HashMap<String, Map<String, Value>>,
     pub ref_extras: HashMap<String, Map<String, Value>>,
 }
@@ -367,12 +390,14 @@ pub fn spans_to_text(spans: &[Span], name: &dyn Fn(&str) -> String, side: &mut S
             }
             Span::Ref { id, cloze, extra } => {
                 // names can themselves contain [[refs]]; strip brackets so the token parses
-                let n: String = name(id).replace(['[', ']'], "").replace('\n', " ");
+                let clean = |s: String| s.replace(['[', ']'], "").replace('\n', " ");
+                let n = clean(name(id));
                 side.refs.insert(n.clone(), id.clone());
+                let tok = if has_alias(extra, name) { format!("{n}|{}", clean(ref_label(id, extra, name))) } else { n };
                 if !extra.is_empty() {
-                    side.ref_extras.insert(id.clone(), extra.clone());
+                    side.ref_extras.insert(tok.clone(), extra.clone());
                 }
-                (format!("[[{n}]]"), cloze)
+                (format!("[[{tok}]]"), cloze)
             }
             Span::Opaque(v) => {
                 side.opaque.push(v.clone());
@@ -432,9 +457,8 @@ fn code_spans(raw: &str, side: &Side) -> Vec<Span> {
         let mut hit = None;
         if let Some(inner) = rest.strip_prefix("[[") {
             if let Some(end) = inner.find("]]") {
-                if let Some(id) = side.refs.get(&inner[..end]) {
-                    let extra = side.ref_extras.get(id).cloned().unwrap_or_default();
-                    hit = Some((Span::Ref { id: id.clone(), cloze: None, extra }, 2 + end + 2));
+                if let Some(sp) = ref_token(&inner[..end], &|_| None, side) {
+                    hit = Some((sp, 2 + end + 2));
                 }
             }
         } else if let Some(inner) = rest.strip_prefix("![image](") {
@@ -540,6 +564,30 @@ pub fn text_to_line(s: &str, resolve: &dyn Fn(&str) -> Option<String>, side: &Si
     }
 }
 
+/// A `[[name]]` / `[[name|alias]]` token's inner text -> a ref span. The whole
+/// text is tried as a name first, so names containing `|` still resolve.
+/// A new alias gets `aliasText`; the commit creates it (or reuses an equal one).
+fn ref_token(n: &str, resolve: &dyn Fn(&str) -> Option<String>, side: &Side) -> Option<Span> {
+    let find = |n: &str| side.refs.get(n).cloned().or_else(|| resolve(n));
+    if let Some(id) = find(n) {
+        let extra = side.ref_extras.get(n).cloned().unwrap_or_default();
+        return Some(Span::Ref { id, cloze: None, extra });
+    }
+    let (target, shown) = n.rsplit_once('|')?;
+    let id = find(target)?;
+    let extra = match side.ref_extras.get(n) {
+        Some(e) => e.clone(),
+        None if shown.trim().is_empty() => Map::new(),
+        None => {
+            let mut e = side.ref_extras.get(target).cloned().unwrap_or_default();
+            e.remove("aliasId");
+            e.insert("aliasText".into(), json!(shown));
+            e
+        }
+    };
+    Some(Span::Ref { id, cloze: None, extra })
+}
+
 fn text_span(t: String, b: bool, i: bool, code: bool, cloze: Option<String>, _side: &Side) -> Span {
     Span::Text { t, b, i, u: false, code, cloze, extra: Map::new() }
 }
@@ -585,11 +633,8 @@ pub fn inline(s: &str, resolve: &dyn Fn(&str) -> Option<String>, side: &Side, ne
         if let Some(inner) = rest.strip_prefix("[[") {
             if let Some(end) = inner.find("]]") {
                 let n = &inner[..end];
-                match side.refs.get(n).cloned().or_else(|| resolve(n)) {
-                    Some(id) => {
-                        let extra = side.ref_extras.get(&id).cloned().unwrap_or_default();
-                        out.push(Span::Ref { id, cloze: None, extra })
-                    }
+                match ref_token(n, resolve, side) {
+                    Some(sp) => out.push(sp),
                     None => out.push(text_span(format!("[[{n}]]"), false, false, false, None, side)),
                 }
                 rest = &inner[end + 2..];
@@ -750,5 +795,33 @@ mod tests {
             to_rt(&l.front),
             json!([{"i":"m","text":"bold","b":true}, " ", {"i":"m","text":"it","l":true}, " ", {"i":"m","text":"hidden","cId":"c1"}, " ", {"i":"q","_id":"id1"}])
         );
+    }
+
+    #[test]
+    fn alias_refs() {
+        // an existing alias: shows the alias, round-trips with its aliasId
+        let names = |id: &str| match id {
+            "lp" => "Linear Program".to_owned(),
+            "al" => "LP".to_owned(),
+            _ => String::new(),
+        };
+        let l = Line { kind: Kind::Plain, front: rt(r#"["solve the ", {"i":"q","_id":"lp","aliasId":"al"}, " or ", {"i":"q","_id":"lp"}]"#), back: vec![] };
+        let mut side = Side::default();
+        let text = line_to_text(&l, &names, &mut side);
+        assert_eq!(text, "solve the [[Linear Program|LP]] or [[Linear Program]]");
+        let back = text_to_line(&text, &|_| None, &side, &mut || "c".into());
+        assert_eq!(to_rt(&back.front), to_rt(&l.front));
+        assert_eq!(plain(&back.front, &names), "solve the LP or Linear Program");
+        // a typed alias: aliasText until the commit creates it
+        let side = Side::default();
+        let l = text_to_line("an [[Linear Program|LP]]", &|n| (n == "Linear Program").then(|| "lp".into()), &side, &mut || "c".into());
+        assert_eq!(to_rt(&l.front), json!(["an ", {"i":"q","_id":"lp","aliasText":"LP"}]));
+        assert_eq!(plain(&l.front, &names), "an LP");
+        // a deleted alias rem: plain name, aliasId kept
+        let l = Line { kind: Kind::Plain, front: rt(r#"[{"i":"q","_id":"lp","aliasId":"gone"}]"#), back: vec![] };
+        let mut side = Side::default();
+        let text = line_to_text(&l, &names, &mut side);
+        assert_eq!(text, "[[Linear Program]]");
+        assert_eq!(to_rt(&text_to_line(&text, &|_| None, &side, &mut || "c".into()).front), to_rt(&l.front));
     }
 }
