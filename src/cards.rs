@@ -222,19 +222,22 @@ impl App {
                             let n = if side == 0 { c.m.mine.len() } else { c.deck.len() };
                             for i in 0..n {
                                 let sel = c.cur[side] == i;
-                                let (line, state, section) = if side == 0 {
+                                // state tag: only what's worth reading (auto-matched cards get none)
+                                let (line, kids, state, section) = if side == 0 {
                                     let (rem, p) = &c.m.mine[i];
                                     let st = match p {
-                                        Some((_, true)) => ("\u{f0c1}", RED),
-                                        Some((_, false)) => ("~", FG_DIM),
+                                        Some((_, true)) => ("\u{f0c1} linked", RED),
+                                        Some((_, false)) => ("", FG_DIM),
                                         None => ("only yours", COMMENT),
                                     };
-                                    (d.kb.line_of(rem), st, None)
+                                    // a >>> card's answer is its children
+                                    let kids: Vec<rich::Line> = if d.kb.is_multiline(rem) { d.kb.children(Some(rem)).iter().map(|k| d.kb.line_of(k)).collect() } else { vec![] };
+                                    (d.kb.line_of(rem), kids, st, None)
                                 } else {
                                     let t = &c.deck[i];
-                                    let st = if c.m.theirs_free.contains(&i) { ("+ missing", RED_BRIGHT) } else { ("✓", FG_DIM) };
+                                    let st = if c.m.theirs_free.contains(&i) { ("+ missing", RED_BRIGHT) } else { ("", FG_DIM) };
                                     let first_in_section = i == 0 || c.deck[i - 1].section != t.section;
-                                    (t.line.clone(), st, first_in_section.then(|| t.section.clone()))
+                                    (t.line.clone(), t.item_lines.clone(), st, first_in_section.then(|| t.section.clone()))
                                 };
                                 if let Some(sec) = section {
                                     ui.add_space(6.0);
@@ -245,7 +248,18 @@ impl App {
                                     ui.vertical(|ui| {
                                         let st = render::Style { size: NOTE_TEXT - 1.0, color: if gap && side == 1 { FG_BRIGHT } else { FG }, bold: false, bullet: None };
                                         render::line(ui, &d.kb, math, &line, &st);
-                                        ui.label(RichText::new(state.0).size(11.0).color(state.1));
+                                        for k in &kids {
+                                            ui.horizontal_top(|ui| {
+                                                ui.add_space(18.0);
+                                                ui.vertical(|ui| {
+                                                    let ks = render::Style { size: NOTE_TEXT - 2.0, color: FG, bold: false, bullet: Some(("•", RED)) };
+                                                    render::line(ui, &d.kb, math, k, &ks);
+                                                });
+                                            });
+                                        }
+                                        if !state.0.is_empty() {
+                                            ui.label(RichText::new(state.0).size(11.0).color(state.1));
+                                        }
                                     });
                                 });
                                 if sel && c.scroll[side] {

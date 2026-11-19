@@ -20,6 +20,8 @@ pub struct DeckCard {
     pub line: Line,
     pub key: String, // normalised front, the link key
     pub items: Vec<String>,
+    /// `items` parsed, for drawing the answer under a >>> card
+    pub item_lines: Vec<Line>,
 }
 
 pub fn deck_files(module: &str, week: u32) -> Vec<PathBuf> {
@@ -75,7 +77,10 @@ pub fn parse(path: &Path) -> Vec<DeckCard> {
             parent_card = Some((indent, out.len()));
         }
         let key = norm(&rich::plain(&line.front, &|_| String::new()));
-        out.push(DeckCard { section: section.clone(), text: body, line, key, items: vec![] });
+        out.push(DeckCard { section: section.clone(), text: body, line, key, items: vec![], item_lines: vec![] });
+    }
+    for c in &mut out {
+        c.item_lines = c.items.iter().map(|t| rich::text_to_line(t, &|_| None, &rich::Side::default(), &mut || "c".into())).collect();
     }
     out
 }
