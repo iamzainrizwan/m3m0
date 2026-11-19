@@ -2146,6 +2146,7 @@ dependencies = [
  "serde_json",
  "tiny_http",
  "tungstenite",
+ "x11rb",
 ]
 
 [[package]]

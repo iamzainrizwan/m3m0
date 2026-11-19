@@ -47,9 +47,18 @@ async function apply(plugin: ReactRNPlugin, m: Msg): Promise<any> {
     }
     case 'alias': {
       // [[name|alias]] refs: an alias rem of m.rem with text m.text (reused if equal)
-      const a = await (await rem(plugin, m.rem)).getOrCreateAliasWithText(m.text as RichTextInterface);
-      if (!a) throw new Error(`no alias for ${m.rem}`);
-      return { id: a._id };
+      const r = await rem(plugin, m.rem);
+      const a: any = await r.getOrCreateAliasWithText(m.text as RichTextInterface);
+      let id: string | undefined = typeof a === 'string' ? a : a?._id;
+      if (!id) {
+        // the returned Rem can come back without an id: find the alias by its text
+        const want = await plugin.richText.toString(m.text as RichTextInterface);
+        for (const al of await r.getAliases()) {
+          if ((await plugin.richText.toString(al.text ?? [])) === want) id = al._id;
+        }
+      }
+      // no id: m3m0 reads it from the rem's `al` field in the DB
+      return id ? { id } : {};
     }
     case 'review': {
       const c = await plugin.card.findOne(m.card);

@@ -338,6 +338,7 @@ pub fn launch_remnote() -> Result<(), String> {
             .is_ok()
     };
     if try_run("flatpak", &["run", "com.remnote.RemNote"]) || try_run("remnote", &[]) {
+        std::thread::spawn(|| minimise_remnote(std::time::Duration::from_secs(60)));
         Ok(())
     } else {
         Err("couldn't start RemNote (flatpak com.remnote.RemNote)".into())
@@ -347,4 +348,49 @@ pub fn launch_remnote() -> Result<(), String> {
 /// Quit RemNote (flatpak) so it can be relaunched and load the plugin from m3m0.
 pub fn stop_remnote() -> bool {
     std::process::Command::new("flatpak").args(["kill", "com.remnote.RemNote"]).status().map(|s| s.success()).unwrap_or(false)
+}
+
+/// RemNote is only the sync engine: minimise its window as soon as it maps, so
+/// it never sits in front of m3m0. It runs under XWayland (WM_CLASS "remnote"),
+/// so an ICCCM WM_CHANGE_STATE → Iconic request to the window manager does it.
+pub fn minimise_remnote(wait: std::time::Duration) -> bool {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ClientMessageEvent, ConnectionExt, EventMask};
+    let Ok((conn, screen)) = x11rb::connect(None) else { return false };
+    let root = conn.setup().roots[screen].root;
+    let atom = |n: &str| conn.intern_atom(false, n.as_bytes()).ok()?.reply().ok().map(|r| r.atom);
+    let (Some(list), Some(change)) = (atom("_NET_CLIENT_LIST"), atom("WM_CHANGE_STATE")) else { return false };
+    let start = std::time::Instant::now();
+    while start.elapsed() < wait {
+        let wins: Vec<u32> = conn
+            .get_property(false, root, list, AtomEnum::WINDOW, 0, 1024)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .and_then(|r| r.value32().map(|v| v.collect()))
+            .unwrap_or_default();
+        let remnote: Vec<u32> = wins
+            .into_iter()
+            .filter(|&w| {
+                conn.get_property(false, w, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64)
+                    .ok()
+                    .and_then(|c| c.reply().ok())
+                    .is_some_and(|r| String::from_utf8_lossy(&r.value).to_lowercase().contains("remnote"))
+            })
+            .collect();
+        if !remnote.is_empty() {
+            // at once, then again for 2 s: a request sent mid-map can be dropped,
+            // and Electron re-shows its window once the page has loaded
+            for _ in 0..20 {
+                for &w in &remnote {
+                    let ev = ClientMessageEvent::new(32, w, change, [3u32, 0, 0, 0, 0]); // 3 = IconicState
+                    let _ = conn.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY, ev);
+                }
+                let _ = conn.flush();
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(30));
+    }
+    false
 }

@@ -28,7 +28,7 @@ m3m0 → plugin: `{"id": N, "op": "...", ...}`; reply
 | `update` | `rem`, set-fields | set-fields on an existing rem |
 | `delete` | `rem` | `rem.remove()` |
 | `get` | `rem` | `{text, back, parent, type, cards[{id,type,next,history}]}` |
-| `alias` | `rem`, `text` | `rem.getOrCreateAliasWithText(text)`; `{id}` (for `[[name\|alias]]` refs, sent as `aliasId`) |
+| `alias` | `rem`, `text` | `rem.getOrCreateAliasWithText(text)`; `{id}` if the SDK gives one, else `{}` and m3m0 reads the id from the rem's `al` in the DB (for `[[name\|alias]]` refs, sent as `aliasId`) |
 | `review` | `card`, `score` | `card.updateCardRepetitionStatus(score)`; `{next, history}` |
 
 set-fields (all optional): `parent` (+`position`) → `setParent`; `text` →
@@ -86,3 +86,13 @@ m3m0 bridge-test                    # serves the plugin, waits for it
 # check the phone for "m3m0 bridge test <stamp>", then:
 m3m0 bridge-test --cleanup <root id>
 ```
+
+## launching RemNote out of sight
+
+`launch_remnote` starts the flatpak, then `minimise_remnote` watches XWayland's
+`_NET_CLIENT_LIST` for WM_CLASS `remnote` and sends ICCCM `WM_CHANGE_STATE`
+(Iconic) the moment it maps, repeating for 2 s. It still flashes for a frame
+or two. Fully invisible would need a virtual X server (`xvfb`, not installed):
+`flatpak run --nosocket=wayland --env=DISPLAY=:99 com.remnote.RemNote` against
+`Xvfb :99`. `m3m0 hide-remnote` minimises an already-open RemNote.
+`m3m0 apply FILE` = `:stage FILE` + `:w` without the UI (m3m0 must be closed).

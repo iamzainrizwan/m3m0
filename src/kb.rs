@@ -63,6 +63,9 @@ pub struct Kb {
     pub db_bytes: u64,
     /// raw card docs (scheduling: n = next due, ml = memory level, h = history)
     pub card_docs: Vec<Value>,
+    /// alias id -> its rich text. RemNote keeps aliases on the target rem
+    /// (`doc.al = [{aliasId, alias}]`), not as rems of their own.
+    pub aliases: HashMap<String, Value>,
 }
 
 /// Consistent in-memory copy of the live DB (WAL included), never writing to it.
@@ -89,8 +92,15 @@ impl Kb {
                 q.insert(r.0, v);
             }
         }
-        // alias rems (`[[name|alias]]` targets) are children of their rem but,
-        // as in RemNote, never shown as bullets; every ref through one names it
+        let mut alias_rt = HashMap::new();
+        for d in q.values() {
+            for a in d.get("al").and_then(Value::as_array).into_iter().flatten() {
+                if let (Some(id), Some(t)) = (a.get("aliasId").and_then(Value::as_str), a.get("alias")) {
+                    alias_rt.insert(id.to_owned(), t.clone());
+                }
+            }
+        }
+        // in case an alias also exists as a rem: never show it as a bullet
         let mut aliases = std::collections::HashSet::new();
         for d in q.values() {
             for side in ["key", "value"] {
@@ -128,7 +138,7 @@ impl Kb {
         }
         drop(st);
         let db_bytes = std::fs::metadata(db).map(|m| m.len()).unwrap_or(0);
-        Ok(Kb { q, kids, dirs, cards, db_bytes, card_docs })
+        Ok(Kb { q, kids, dirs, cards, db_bytes, card_docs, aliases: alias_rt })
     }
 
     pub fn children(&self, i: Option<&str>) -> &[String] {
@@ -153,7 +163,8 @@ impl Kb {
                     // through an alias: the alias's text (its rem, or a not-yet-created one)
                     let alias = p.get("aliasText").and_then(Value::as_str).map(str::to_owned).or_else(|| {
                         let a = p.get("aliasId").and_then(Value::as_str)?;
-                        Some(self.text(self.q.get(a)?.get("key"), md)).filter(|t| !t.trim().is_empty())
+                        let rt = self.q.get(a).and_then(|d| d.get("key")).or_else(|| self.aliases.get(a))?;
+                        Some(self.text(Some(rt), md)).filter(|t| !t.trim().is_empty())
                     });
                     let id = p.get("_id").and_then(Value::as_str).unwrap_or("");
                     out.push_str("[[");
@@ -184,7 +195,20 @@ impl Kb {
     }
 
     pub fn name(&self, i: &str) -> String {
-        self.text(self.q.get(i).and_then(|d| d.get("key")), false).trim().to_owned()
+        let rt = self.q.get(i).and_then(|d| d.get("key")).or_else(|| self.aliases.get(i));
+        self.text(rt, false).trim().to_owned()
+    }
+
+    /// The id of `rem`'s alias reading `text`, straight from a fresh snapshot of
+    /// the DB (the plugin SDK hands back aliases without their ids).
+    pub fn alias_id(db: &Path, rem: &str, text: &str) -> Option<String> {
+        let conn = snapshot(db).ok()?;
+        let doc: String = conn.query_row("select doc from quanta where _id = ?1", [rem], |r| r.get(0)).ok()?;
+        let d: Value = serde_json::from_str(&doc).ok()?;
+        let plain = |v: &Value| -> String {
+            v.as_array().into_iter().flatten().map(|p| p.as_str().map(str::to_owned).unwrap_or_else(|| p.get("text").and_then(Value::as_str).unwrap_or("").to_owned())).collect()
+        };
+        d.get("al")?.as_array()?.iter().find(|a| a.get("alias").is_some_and(|t| plain(t) == text))?.get("aliasId")?.as_str().map(str::to_owned)
     }
 
     pub fn heading(&self, i: &str) -> Option<u8> {

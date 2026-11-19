@@ -123,6 +123,7 @@ reference to LP doesn't expand to Linear Programming"). Stored the RemNote
 way: the ref carries `aliasId`, an alias rem under the target, so it reads the
 same on the phone. Typed in m3m0, the ref holds `aliasText` until `:w`, which
 calls the bridge's `alias` op (`getOrCreateAliasWithText`, reuses an equal
-alias). Alias rems are hidden from the tree and from `[[` name lookup; m3m0
-spots them as the rems some ref names by `aliasId` (RemNote's own alias
-marker in the DB hasn't been read yet).
+alias). RemNote keeps aliases on the target rem, not as rems:
+`doc.al = [{aliasId, alias: <rich text>}]` (checked 2026-11-19). The SDK hands
+the alias back without its id, so the commit reads the id off `al` in a fresh
+snapshot. `Kb::name` resolves alias ids through `Kb::aliases`.

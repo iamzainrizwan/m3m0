@@ -33,6 +33,12 @@ fn main() -> eframe::Result {
     if args.get(1).map(String::as_str) == Some("commit-test") {
         std::process::exit(commit_test(args.iter().any(|a| a == "--keep")));
     }
+    if args.get(1).map(String::as_str) == Some("hide-remnote") {
+        std::process::exit(!bridge::minimise_remnote(std::time::Duration::from_secs(60)) as i32);
+    }
+    if args.get(1).map(String::as_str) == Some("apply") {
+        std::process::exit(apply_file(args.get(2).map(String::as_str).unwrap_or_default()));
+    }
     if args.get(1).map(String::as_str) == Some("pairs") {
         std::process::exit(pairs_dump());
     }
@@ -2404,6 +2410,46 @@ impl App {
         }
         self.msg = Some(format!("staged {n} {} from {} ({skipped} skipped): :diff to review, :w to send", plural(n, "edit"), path.display()));
     }
+}
+
+/// `m3m0 apply FILE`: `:stage FILE` + `:w` without the UI (needs m3m0 closed,
+/// so the plugin connects here). Rems already matching are skipped; logged to
+/// the commit log like any commit, so `:log` can revert it.
+fn apply_file(path: &str) -> i32 {
+    let Some(db) = kb::resolve_db(Config::load().db.as_deref()) else { return 2 };
+    let Ok(kb) = Kb::load(&db) else { return 2 };
+    let list: Vec<serde_json::Value> = match std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()) {
+        Some(l) => l,
+        None => {
+            eprintln!("can't read {path}");
+            return 2;
+        }
+    };
+    let mut ops = vec![];
+    for e in list {
+        let Some(id) = e["id"].as_str().filter(|i| kb.q.contains_key(*i)) else { continue };
+        let before = edit::LineJson::of(&kb.line_of(id));
+        let after = edit::LineJson { kind: before.kind.clone(), front: e.get("front").cloned().unwrap_or_else(|| before.front.clone()), back: e.get("back").cloned().unwrap_or_else(|| before.back.clone()) };
+        if after != before {
+            ops.push(edit::Op::Update { id: id.to_owned(), before, after });
+        }
+    }
+    println!("{} edits to send", ops.len());
+    if ops.is_empty() {
+        return 0;
+    }
+    let b = bridge::Bridge::start(|| {});
+    println!("waiting for the RemNote plugin (up to 90 s)…");
+    if !b.wait_online(90) {
+        eprintln!("plugin didn't connect");
+        return 1;
+    }
+    let out = commit::run(&b, &ops, &std::collections::HashMap::new());
+    if out.done > 0 {
+        commit::append_log(&ops[..out.done]);
+    }
+    println!("done {}/{}  err {:?}", out.done, ops.len(), out.err);
+    out.err.is_some() as i32
 }
 
 /// `m3m0 pairs`: JSON of every module week's own cards, Claude deck cards

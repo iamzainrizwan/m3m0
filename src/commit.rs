@@ -88,7 +88,22 @@ fn resolve_aliases(bridge: &Bridge, v: &mut Value, cache: &mut HashMap<(String, 
                 Some(id) => id.clone(),
                 None => {
                     let res = bridge.call("alias", json!({ "rem": rem, "text": [text] }))?;
-                    let id = res["id"].as_str().ok_or("alias returned no id")?.to_owned();
+                    let id = match res["id"].as_str() {
+                        Some(id) => id.to_owned(),
+                        // the SDK doesn't return alias ids: read it off the rem's `al` once RemNote has saved it
+                        None => {
+                            let db = crate::kb::resolve_db(crate::config::Config::load().db.as_deref()).ok_or("no RemNote db")?;
+                            let mut found = None;
+                            for _ in 0..40 {
+                                found = crate::kb::Kb::alias_id(&db, rem, text);
+                                if found.is_some() {
+                                    break;
+                                }
+                                std::thread::sleep(std::time::Duration::from_millis(250));
+                            }
+                            found.ok_or_else(|| format!("alias \"{text}\" made, but its id never showed up in the db"))?
+                        }
+                    };
                     cache.insert(key, id.clone());
                     id
                 }
