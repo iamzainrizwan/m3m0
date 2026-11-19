@@ -91,6 +91,16 @@ impl App {
         let near = e.id.clone();
         let line = rich::text_to_line(&e.buf, &|n| d.kb.resolve(n, Some(&near)), &e.side, &mut cloze_id);
         let (before, after) = (LineJson::of(&e.orig), LineJson::of(&line));
+        // a bullet just made with o/O/enter: fold the text into its Create
+        if e.created {
+            if let Some(Op::Create { id, line: l, .. }) = self.changes.ops.last_mut() {
+                if *id == e.id {
+                    *l = after;
+                    crate::edit::set_line(&mut d.kb, &e.id, &line);
+                    return Some(e.id);
+                }
+            }
+        }
         if before != after {
             self.changes.apply(&mut d.kb, Op::Update { id: e.id.clone(), before, after });
         }

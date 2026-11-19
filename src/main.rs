@@ -1,5 +1,6 @@
 mod boot;
 mod bridge;
+mod commit;
 mod config;
 mod edit;
 mod editor;
@@ -96,6 +97,9 @@ enum Overlay {
     Help,
     Db { list: Vec<DbCandidate>, cur: usize },
     Cmd(String),
+    /// staged changes; enter commits
+    Diff { scroll: usize },
+    Log { entries: Vec<commit::Entry>, cur: usize },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -140,6 +144,8 @@ struct App {
     editing: Option<editor::Editing>,
     /// cursor position to set in the edit box next frame (after autocomplete)
     pending_cursor: Option<usize>,
+    bridge: bridge::Bridge,
+    committing: Option<mpsc::Receiver<(commit::Outcome, Vec<edit::Op>)>>,
 }
 
 fn load(db: Option<PathBuf>) -> Result<Loaded, String> {
@@ -225,6 +231,8 @@ impl App {
             cc.egui_ctx.set_zoom_factor(z);
         }
         let rx = Self::spawn_load(&cc.egui_ctx, kb::resolve_db(cfg.db.as_deref()));
+        let rc = cc.egui_ctx.clone();
+        let bridge = bridge::Bridge::start(move || rc.request_repaint());
         App {
             boot: boot::Boot::new(),
             rx,
@@ -249,6 +257,8 @@ impl App {
             changes: edit::Changes::default(),
             editing: None,
             pending_cursor: None,
+            bridge,
+            committing: None,
         }
     }
 
@@ -605,8 +615,123 @@ impl App {
                 }
                 _ => {}
             },
+            Overlay::Diff { scroll } => match k {
+                K::Ch('j') | K::Down => *scroll += 1,
+                K::Ch('k') | K::Up => *scroll = scroll.saturating_sub(1),
+                K::Enter => {
+                    self.overlay = Overlay::None;
+                    self.start_commit();
+                }
+                K::Esc | K::Ch('q') => self.overlay = Overlay::None,
+                _ => {}
+            },
+            Overlay::Log { entries, cur } => match k {
+                K::Ch('j') | K::Down => *cur = (*cur + 1).min(entries.len().saturating_sub(1)),
+                K::Ch('k') | K::Up => *cur = cur.saturating_sub(1),
+                K::Enter => {
+                    if let Some(e) = entries.get(*cur) {
+                        let ops = e.ops.clone();
+                        self.overlay = Overlay::None;
+                        self.stage_revert(&ops);
+                    }
+                }
+                K::Esc | K::Ch('q') => self.overlay = Overlay::None,
+                _ => {}
+            },
             Overlay::None => {}
         }
+    }
+
+    /// Stage the inverse of a past commit (newest op first) for review with :w.
+    fn stage_revert(&mut self, ops: &[edit::Op]) {
+        let Some(Ok(d)) = &mut self.data else { return };
+        let mut n = 0;
+        for op in ops.iter().rev() {
+            let inv = match op {
+                // undoing a create = deleting it now, with a snapshot so undo works
+                edit::Op::Create { id, .. } => {
+                    let Some(p) = d.kb.q.get(id).and_then(|x| x.get("parent")).and_then(|p| p.as_str()).map(str::to_owned) else { continue };
+                    let pos = d.kb.children(Some(&p)).iter().position(|k| k == id).unwrap_or(0);
+                    edit::Op::Delete { id: id.clone(), parent: p, pos, docs: edit::snapshot(&d.kb, id) }
+                }
+                other => edit::inverse(other),
+            };
+            self.changes.apply(&mut d.kb, inv);
+            n += 1;
+        }
+        self.msg = Some(format!("staged {n} ops reverting that commit: :w to review and commit"));
+    }
+
+    fn start_commit(&mut self) {
+        if self.committing.is_some() {
+            self.msg = Some("a commit is already running".into());
+            return;
+        }
+        let ops = self.changes.ops.clone();
+        if ops.is_empty() {
+            self.msg = Some("nothing staged".into());
+            return;
+        }
+        if let Err(e) = commit::validate(&ops) {
+            self.msg = Some(e);
+            return;
+        }
+        let Some(Ok(d)) = &self.data else { return };
+        // children of rems becoming >>> cards, as they are now
+        let mut children = std::collections::HashMap::new();
+        for op in &ops {
+            if let edit::Op::Update { id, after, .. } = op {
+                if after.kind == "multiline" {
+                    children.insert(id.clone(), d.kb.children(Some(id)).to_vec());
+                }
+            }
+        }
+        let bridge = self.bridge.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            if !bridge.is_online() {
+                // RemNote loads the plugin from us at its startup: start it if it isn't running
+                let started = !bridge::remnote_running() && bridge::launch_remnote().is_ok();
+                if !bridge.wait_online(if started { 120 } else { 75 }) {
+                    let err = if started {
+                        "started RemNote but the bridge plugin didn't connect within 2 min".to_string()
+                    } else {
+                        "RemNote is running without the bridge: restart RemNote so it loads the plugin from m3m0".to_string()
+                    };
+                    let _ = tx.send((commit::Outcome { done: 0, idmap: Default::default(), err: Some(err) }, ops));
+                    return;
+                }
+            }
+            let out = commit::run(&bridge, &ops, &children);
+            let _ = tx.send((out, ops));
+        });
+        self.committing = Some(rx);
+        self.msg = Some("committing…".into());
+    }
+
+    /// Apply a finished commit: log what went through, map temporary ids to real ones.
+    fn finish_commit(&mut self, out: commit::Outcome, ops: Vec<edit::Op>) {
+        let m = &out.idmap;
+        let done: Vec<edit::Op> = ops[..out.done].iter().map(|o| commit::rename_op(o, m)).collect();
+        if !done.is_empty() {
+            commit::append_log(&done);
+        }
+        let rest: Vec<edit::Op> = self.changes.ops.drain(..).skip(out.done).map(|o| commit::rename_op(&o, m)).collect();
+        self.changes.ops = rest;
+        self.changes.redo.clear();
+        if let Some(Ok(d)) = &mut self.data {
+            rename_ids(&mut d.kb, m);
+        }
+        self.folded = self.folded.iter().map(|f| m.get(f).cloned().unwrap_or_else(|| f.clone())).collect();
+        if let Some(w) = &self.week {
+            if let Some(r) = m.get(w) {
+                self.week = Some(r.clone());
+            }
+        }
+        self.msg = Some(match out.err {
+            None => format!("committed {} changes to RemNote", out.done),
+            Some(e) => format!("committed {} of {}; stopped: {e} (the rest stay staged)", out.done, ops.len()),
+        });
     }
 
     fn reload(&mut self, ctx: &egui::Context, db: Option<PathBuf>) {
@@ -634,7 +759,11 @@ impl App {
                     .unwrap_or(0);
                 self.overlay = Overlay::Db { list, cur };
             }
-            (Some("reload" | "e"), _) => {
+            (Some("reload" | "e"), _) if !self.changes.ops.is_empty() => {
+                self.msg = Some(format!("{} staged changes would be lost: :w first, or :e! to drop them", self.changes.ops.len()));
+            }
+            (Some("reload" | "e" | "e!"), _) => {
+                self.changes = edit::Changes::default();
                 let db = kb::resolve_db(self.cfg.db.as_deref());
                 self.reload(ctx, db);
             }
@@ -645,7 +774,15 @@ impl App {
                 }
                 Err(_) => self.msg = Some(format!("zoom: not a number: {z}")),
             },
-            (Some("w"), _) => self.msg = Some("nothing staged (commits arrive in phase 3)".into()),
+            (Some("w" | "diff"), _) => {
+                if self.changes.ops.is_empty() {
+                    self.msg = Some("nothing staged".into());
+                } else {
+                    self.overlay = Overlay::Diff { scroll: 0 };
+                }
+            }
+            (Some("w!"), _) => self.start_commit(),
+            (Some("log"), _) => self.overlay = Overlay::Log { entries: commit::read_log(), cur: 0 },
             (Some("help" | "h"), _) => self.overlay = Overlay::Help,
             (Some(""), _) | (None, _) => {}
             (Some(c), _) => self.msg = Some(format!("not a command: {c}")),
@@ -699,6 +836,13 @@ impl eframe::App for App {
             for k in ks {
                 self.handle(ctx, k);
             }
+        }
+        if let Some(rx) = &self.committing {
+            if let Ok((out, ops)) = rx.try_recv() {
+                self.committing = None;
+                self.finish_commit(out, ops);
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(200));
         }
         edge_resize(ctx);
 
@@ -822,7 +966,17 @@ impl App {
                 Some(Ok(d)) => d.db.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
                 _ => String::new(),
             };
-            let right = format!("{}  {db}  {:.0}%  ? keys", self.pending, ctx.zoom_factor() * 100.0);
+            let err = self.bridge.error.lock().ok().and_then(|e| e.clone());
+            let br = if self.committing.is_some() {
+                "committing".to_owned()
+            } else if self.bridge.is_online() {
+                "bridge online".to_owned()
+            } else if let Some(e) = err {
+                format!("bridge: {e}")
+            } else {
+                "bridge offline".to_owned()
+            };
+            let right = format!("{}  {br}  ·  {db}  {:.0}%  ? keys", self.pending, ctx.zoom_factor() * 100.0);
             p.text(Pos2::new(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, right, f, COMMENT);
         });
     }
@@ -1073,6 +1227,63 @@ impl App {
                     ui.label(RichText::new("j/k move · enter open (saved) · esc cancel").color(COMMENT).size(12.0));
                 });
             }
+            Overlay::Diff { scroll } => {
+                let Some(Ok(d)) = &self.data else { return };
+                let name = |id: &str| if id.starts_with("tmp-") { "(new)".to_owned() } else { d.kb.name(id) };
+                let lines: Vec<(char, String)> = self.changes.ops.iter().map(|o| commit::describe(o, &name)).collect();
+                let scroll = (*scroll).min(lines.len().saturating_sub(1));
+                let h = (screen.height() - 120.0).min(140.0 + lines.len() as f32 * 26.0);
+                modal(ctx, &format!("staged · {} changes", lines.len()), screen, Vec2::new(900.0, h), |ui| {
+                    egui::ScrollArea::vertical().max_height(h - 110.0).show(ui, |ui| {
+                        for (i, (c, t)) in lines.iter().enumerate().skip(scroll) {
+                            let col = match c {
+                                '+' => FG_BRIGHT,
+                                '-' => RED_BRIGHT,
+                                '~' => FG,
+                                _ => FG_DIM,
+                            };
+                            ui.horizontal_top(|ui| {
+                                ui.label(RichText::new(format!("{c} ")).color(if *c == '-' { RED } else { COMMENT }).size(13.5));
+                                ui.add(egui::Label::new(RichText::new(t).color(col).size(13.5)).wrap());
+                            });
+                            let _ = i;
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("enter commit to RemNote · j/k scroll · esc back · u in the outline undoes").color(COMMENT).size(12.0));
+                });
+            }
+            Overlay::Log { entries, cur } => {
+                let cur = *cur;
+                let Some(Ok(d)) = &self.data else { return };
+                let name = |id: &str| d.kb.name(id);
+                modal(ctx, "commit log", screen, Vec2::new(900.0, (screen.height() - 120.0).min(600.0)), |ui| {
+                    if entries.is_empty() {
+                        ui.label(RichText::new("no commits yet").color(COMMENT));
+                    }
+                    egui::ScrollArea::vertical().max_height(480.0).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for (i, e) in entries.iter().enumerate() {
+                            let when = std::time::UNIX_EPOCH + std::time::Duration::from_secs(e.time);
+                            let ago = when.elapsed().map(|x| x.as_secs()).unwrap_or(0);
+                            let ago = match ago {
+                                s if s < 3600 => format!("{}m ago", s / 60),
+                                s if s < 86400 => format!("{}h ago", s / 3600),
+                                s => format!("{}d ago", s / 86400),
+                            };
+                            let first = e.ops.first().map(|o| commit::describe(o, &name).1).unwrap_or_default();
+                            row(ui, ("log", i), i == cur, true, 0.0, |ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(format!("{ago} · {} changes", e.ops.len())).color(FG).size(13.5));
+                                    ui.add(egui::Label::new(RichText::new(first).color(COMMENT).size(12.0)).truncate());
+                                });
+                            });
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("enter stage a revert of this commit · j/k move · esc close").color(COMMENT).size(12.0));
+                });
+            }
             _ => {}
         }
     }
@@ -1203,4 +1414,25 @@ fn roundtrip() -> i32 {
     }
     println!("{ok} ok, {bad} differ");
     (bad > 0) as i32
+}
+
+/// After a commit: temporary ids -> the ids RemNote assigned, everywhere in the Kb.
+fn rename_ids(kb: &mut Kb, m: &std::collections::HashMap<String, String>) {
+    if m.is_empty() {
+        return;
+    }
+    let touched: Vec<String> = kb.q.iter().filter(|(k, v)| k.starts_with("tmp-") || v.to_string().contains("\"tmp-")).map(|(k, _)| k.clone()).collect();
+    for k in touched {
+        if let Some(v) = kb.q.remove(&k) {
+            let nk = m.get(&k).cloned().unwrap_or(k);
+            let mut v = commit::map_ids(&v, m);
+            v["_id"] = serde_json::json!(nk);
+            kb.q.insert(nk, v);
+        }
+    }
+    let kids = std::mem::take(&mut kb.kids);
+    kb.kids = kids
+        .into_iter()
+        .map(|(p, v)| (p.map(|p| m.get(&p).cloned().unwrap_or(p)), v.into_iter().map(|c| m.get(&c).cloned().unwrap_or(c)).collect()))
+        .collect();
 }

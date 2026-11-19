@@ -177,9 +177,13 @@ pub struct Side {
 }
 
 fn esc(t: &str) -> String {
+    // escape markup characters; brackets/braces only when doubled ([[ / {{)
+    let cs: Vec<char> = t.chars().collect();
     let mut s = String::new();
-    for c in t.chars() {
-        if matches!(c, '$' | '`' | '*' | '\\' | '[' | '{' | '⟪' | '⟫') {
+    for (i, &c) in cs.iter().enumerate() {
+        // doubled, or last in the run (a [[ref]] token may follow)
+        let doubled = cs.get(i + 1).is_none_or(|n| *n == c);
+        if matches!(c, '$' | '`' | '*' | '\\' | '⟪' | '⟫') || (matches!(c, '[' | '{') && doubled) {
             s.push('\\');
         }
         s.push(c);

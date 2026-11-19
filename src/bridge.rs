@@ -194,3 +194,147 @@ pub fn test(args: &[String]) -> Result<(), String> {
     println!("\nnow check your phone for \"m3m0 bridge test {stamp}\". clean up with: m3m0 bridge-test --cleanup {root}");
     Ok(())
 }
+
+// --- long-lived bridge for the app ------------------------------------------------
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+
+type Reply = Sender<Result<Value, String>>;
+
+/// Handle to the bridge worker: serves the plugin, keeps the plugin's websocket,
+/// runs calls one at a time. Cheap to clone.
+#[derive(Clone)]
+pub struct Bridge {
+    tx: Sender<(String, Value, Reply)>,
+    pub online: Arc<AtomicBool>,
+    pub error: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl Bridge {
+    pub fn start(repaint: impl Fn() + Send + 'static) -> Bridge {
+        let (tx, rx) = channel();
+        let online = Arc::new(AtomicBool::new(false));
+        let error = Arc::new(std::sync::Mutex::new(None));
+        if let Err(e) = serve_plugin() {
+            *error.lock().unwrap() = Some(format!("plugin server: {e}"));
+        }
+        let (o, er) = (online.clone(), error.clone());
+        std::thread::spawn(move || worker(rx, o, er, repaint));
+        Bridge { tx, online, error }
+    }
+
+    pub fn is_online(&self) -> bool {
+        self.online.load(Ordering::Relaxed)
+    }
+
+    /// Blocking call (use from a background thread).
+    pub fn call(&self, op: &str, args: Value) -> Result<Value, String> {
+        let (rtx, rrx) = channel();
+        self.tx.send((op.to_owned(), args, rtx)).map_err(|_| "bridge worker stopped".to_string())?;
+        rrx.recv_timeout(Duration::from_secs(60)).map_err(|_| format!("{op}: no reply from RemNote within 60 s"))?
+    }
+
+    /// Wait until the plugin is connected, up to `secs`.
+    pub fn wait_online(&self, secs: u64) -> bool {
+        let t0 = Instant::now();
+        while !self.is_online() {
+            if t0.elapsed() > Duration::from_secs(secs) {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        true
+    }
+}
+
+fn handshake(s: TcpStream) -> Result<Conn, String> {
+    s.set_nonblocking(false).map_err(|e| e.to_string())?;
+    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    let mut ws = tungstenite::accept(s).map_err(|e| e.to_string())?;
+    let hello = read_json(&mut ws)?;
+    if hello.get("hello").and_then(Value::as_str) != Some("m3m0-bridge") {
+        return Err(format!("unexpected hello: {hello}"));
+    }
+    Ok(Conn { ws, next: 1 })
+}
+
+fn worker(rx: Receiver<(String, Value, Reply)>, online: Arc<AtomicBool>, error: Arc<std::sync::Mutex<Option<String>>>, repaint: impl Fn()) {
+    let l = match TcpListener::bind(("127.0.0.1", WS_PORT)) {
+        Ok(l) => l,
+        Err(e) => {
+            *error.lock().unwrap() = Some(format!("port {WS_PORT} busy ({e}); is another m3m0 running?"));
+            repaint();
+            for (_, _, r) in rx {
+                let _ = r.send(Err(format!("bridge unavailable: port {WS_PORT} busy")));
+            }
+            return;
+        }
+    };
+    l.set_nonblocking(true).ok();
+    let mut conn: Option<Conn> = None;
+    let mut last_ping = Instant::now();
+    loop {
+        // newest connection wins (RemNote reloading the plugin reconnects)
+        if let Ok((s, _)) = l.accept() {
+            if let Ok(c) = handshake(s) {
+                conn = Some(c);
+                online.store(true, Ordering::Relaxed);
+                repaint();
+            }
+        }
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok((op, args, reply)) => {
+                let r = match conn.as_mut() {
+                    Some(c) => c.call(&op, args),
+                    None => Err("bridge offline: RemNote isn't connected".into()),
+                };
+                if r.as_ref().is_err_and(|e| !e.contains(&format!("{op}:"))) {
+                    // transport error, not an error reported by the plugin
+                    conn = None;
+                    online.store(false, Ordering::Relaxed);
+                    repaint();
+                }
+                let _ = reply.send(r);
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
+            Err(_) => {}
+        }
+        if conn.is_some() && last_ping.elapsed() > Duration::from_secs(10) {
+            last_ping = Instant::now();
+            if conn.as_mut().unwrap().call("ping", json!({})).is_err() {
+                conn = None;
+                online.store(false, Ordering::Relaxed);
+                repaint();
+            }
+        }
+    }
+}
+
+/// Is the RemNote desktop app running? (flatpak or native)
+pub fn remnote_running() -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-f", "remnote/remnote|com.remnote.RemNote|/opt/RemNote"])
+        .output()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false)
+}
+
+/// Start RemNote (it loads the bridge plugin from our server at startup).
+pub fn launch_remnote() -> Result<(), String> {
+    let try_run = |cmd: &str, args: &[&str]| {
+        std::process::Command::new(cmd)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .is_ok()
+    };
+    if try_run("flatpak", &["run", "com.remnote.RemNote"]) || try_run("remnote", &[]) {
+        Ok(())
+    } else {
+        Err("couldn't start RemNote (flatpak com.remnote.RemNote)".into())
+    }
+}
