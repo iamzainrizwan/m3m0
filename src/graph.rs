@@ -100,7 +100,7 @@ impl Graph {
             if index.contains_key(id) {
                 return;
             }
-            let label: String = kb.name(id).replace(['[', ']', '$'], "").replace('\n', " ").chars().take(48).collect();
+            let label: String = crate::rich::readable_str(&kb.name(id)).replace('\n', " ").chars().take(48).collect();
             if label.trim().is_empty() {
                 return;
             }

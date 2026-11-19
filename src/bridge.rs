@@ -217,6 +217,11 @@ impl Bridge {
         let (tx, rx) = channel();
         let online = Arc::new(AtomicBool::new(false));
         let error = Arc::new(std::sync::Mutex::new(None));
+        // previews never take the ports from the real app (or write anything)
+        if std::env::var("M3M0_SHOTS").is_ok() {
+            drop(rx);
+            return Bridge { tx, online, error };
+        }
         if let Err(e) = serve_plugin() {
             *error.lock().unwrap() = Some(format!("plugin server: {e}"));
         }

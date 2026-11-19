@@ -31,13 +31,26 @@ struct Piece {
     asc: f32,
     desc: f32,
     re: Option<String>,
+    /// whitespace at the start / end: a row may only break where one side has it,
+    /// so "(" + maths + ", ie" stay together
+    sp_before: bool,
+    sp_after: bool,
 }
 
 fn text_piece(ui: &egui::Ui, t: RichText, re: Option<String>) -> Piece {
+    let txt = t.text().to_owned();
     let g = WidgetText::from(t).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::FontSelection::Default);
     let base = g.rows.first().and_then(|r| r.glyphs.first()).map(|g| g.pos.y).unwrap_or(g.size().y * 0.8);
     let s = g.size();
-    Piece { w: s.x, asc: base, desc: s.y - base, look: Look::Text(g), re }
+    Piece {
+        w: s.x,
+        asc: base,
+        desc: s.y - base,
+        look: Look::Text(g),
+        re,
+        sp_before: txt.starts_with(char::is_whitespace),
+        sp_after: txt.ends_with(char::is_whitespace),
+    }
 }
 
 fn pieces(ui: &egui::Ui, kb: &Kb, math: &mut Math, sp: &[Span], st: &Style, out: &mut Vec<Piece>) {
@@ -68,7 +81,7 @@ fn pieces(ui: &egui::Ui, kb: &Kb, math: &mut Math, sp: &[Span], st: &Style, out:
             Span::Latex { tex, cloze, .. } => {
                 let col = if cloze.is_some() { FG_BRIGHT } else { st.color };
                 match math.get(ui.ctx(), tex, st.size * KATEX_SCALE, col) {
-                    Some(t) => out.push(Piece { w: t.size.x, asc: t.ascent, desc: t.size.y - t.ascent, look: Look::Tex(t, cloze.as_ref().map(|_| CRIMSON)), re: None }),
+                    Some(t) => out.push(Piece { w: t.size.x, asc: t.ascent, desc: t.size.y - t.ascent, look: Look::Tex(t, cloze.as_ref().map(|_| CRIMSON)), re: None, sp_before: false, sp_after: false }),
                     None => out.push(text_piece(ui, RichText::new(format!("${tex}$")).monospace().size(st.size - 1.0).color(RED_BRIGHT), None)),
                 }
             }
@@ -121,15 +134,25 @@ pub fn line(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, l: &Line, st: &Style) -
     let indent = bullet.as_ref().map_or(0.0, |b| b.w);
     let width = (ui.available_width() - indent).max(40.0);
 
+    // clusters: runs of pieces with no whitespace between them never split
+    let mut clusters: Vec<Vec<usize>> = vec![];
+    for i in 0..ps.len() {
+        let joins = i > 0 && !ps[i - 1].sp_after && !ps[i].sp_before;
+        match clusters.last_mut() {
+            Some(c) if joins => c.push(i),
+            _ => clusters.push(vec![i]),
+        }
+    }
     let mut rows: Vec<Vec<usize>> = vec![vec![]];
     let mut x = 0.0;
-    for (i, p) in ps.iter().enumerate() {
-        if x + p.w > width && !rows.last().unwrap().is_empty() {
+    for c in clusters {
+        let w: f32 = c.iter().map(|&i| ps[i].w).sum();
+        if x + w > width && !rows.last().unwrap().is_empty() {
             rows.push(vec![]);
             x = 0.0;
         }
-        rows.last_mut().unwrap().push(i);
-        x += p.w;
+        rows.last_mut().unwrap().extend(c);
+        x += w;
     }
     let gap = 2.0;
     let metrics: Vec<(f32, f32)> = rows

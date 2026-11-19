@@ -39,14 +39,16 @@ pub fn kind(p: &Path) -> FileKind {
     }
 }
 
+/// Short fixed-width tag for a file kind (text, not glyphs: the nerd-font icons
+/// come from different sets and never lined up).
 pub fn icon(k: FileKind) -> &'static str {
     match k {
-        FileKind::Pdf => "\u{f1c1}",
-        FileKind::Quiz => "\u{f059}",
-        FileKind::Json => "\u{f1c9}",
-        FileKind::Markdown => "\u{f48a}",
-        FileKind::Image => "\u{f1c5}",
-        FileKind::Text => "\u{f15c}",
+        FileKind::Pdf => "pdf ",
+        FileKind::Quiz => "quiz",
+        FileKind::Json => "json",
+        FileKind::Markdown => "md  ",
+        FileKind::Image => "img ",
+        FileKind::Text => "txt ",
     }
 }
 

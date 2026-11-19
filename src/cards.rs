@@ -59,8 +59,9 @@ impl App {
             .map(|(i, t)| (i, deck::similarity(&f, &b, &rich::plain(&t.line.front, &|_| String::new()), &rich::plain(&t.line.back, &|_| String::new()))))
             .collect();
         items.sort_by(|a, b| b.1.total_cmp(&a.1));
-        let labels = items.iter().map(|&(i, _)| format!("{}   · {}", rich::plain(&c.deck[i].line.front, &|_| String::new()), c.deck[i].section)).collect();
-        self.overlay = Overlay::Link(LinkPick { rem: rem.to_owned(), items, cur: 0, title: f, labels });
+        let labels = items.iter().map(|&(i, _)| format!("{}   · {}", rich::readable(&c.deck[i].line.front, &|_| String::new()), c.deck[i].section)).collect();
+        let title = rich::readable(&l.front, &name);
+        self.overlay = Overlay::Link(LinkPick { rem: rem.to_owned(), items, cur: 0, title, labels });
     }
 
     pub(super) fn do_link(&mut self, d: &Loaded, rem: &str, card: usize) {

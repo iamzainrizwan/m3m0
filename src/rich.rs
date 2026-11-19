@@ -160,6 +160,152 @@ pub fn plain(spans: &[Span], name: &dyn Fn(&str) -> String) -> String {
         .collect()
 }
 
+/// Like `plain`, but maths turned into readable unicode (`\mathsf{E}[X]` -> `E[X]`).
+/// For labels drawn as plain text (graph, pickers); never for keys or matching.
+pub fn readable(spans: &[Span], name: &dyn Fn(&str) -> String) -> String {
+    spans
+        .iter()
+        .map(|s| match s {
+            Span::Latex { tex, .. } => tex_unicode(tex),
+            Span::Ref { id, .. } => name(id),
+            _ => plain(std::slice::from_ref(s), name),
+        })
+        .collect()
+}
+
+/// A string with `$..$` maths and `[[refs]]` (as `Kb::name` gives) made readable.
+pub fn readable_str(s: &str) -> String {
+    let s = s.replace("[[", "").replace("]]", "");
+    let mut out = String::new();
+    for (i, part) in s.split('$').enumerate() {
+        if i % 2 == 1 { out.push_str(&tex_unicode(part)) } else { out.push_str(part) }
+    }
+    out
+}
+
+/// Best-effort LaTeX maths -> unicode text. Unknown commands lose their backslash.
+pub fn tex_unicode(tex: &str) -> String {
+    const SYM: &[(&str, &str)] = &[
+        ("alpha", "α"), ("beta", "β"), ("gamma", "γ"), ("delta", "δ"), ("epsilon", "ε"), ("varepsilon", "ε"), ("zeta", "ζ"), ("eta", "η"),
+        ("theta", "θ"), ("iota", "ι"), ("kappa", "κ"), ("lambda", "λ"), ("mu", "μ"), ("nu", "ν"), ("xi", "ξ"), ("pi", "π"), ("rho", "ρ"),
+        ("sigma", "σ"), ("tau", "τ"), ("phi", "φ"), ("varphi", "φ"), ("chi", "χ"), ("psi", "ψ"), ("omega", "ω"),
+        ("Gamma", "Γ"), ("Delta", "Δ"), ("Theta", "Θ"), ("Lambda", "Λ"), ("Sigma", "Σ"), ("Pi", "Π"), ("Phi", "Φ"), ("Psi", "Ψ"), ("Omega", "Ω"),
+        ("leq", "≤"), ("le", "≤"), ("geq", "≥"), ("ge", "≥"), ("neq", "≠"), ("ne", "≠"), ("approx", "≈"), ("equiv", "≡"), ("sim", "∼"),
+        ("in", "∈"), ("notin", "∉"), ("subseteq", "⊆"), ("subset", "⊂"), ("supseteq", "⊇"), ("cup", "∪"), ("cap", "∩"), ("setminus", "∖"),
+        ("to", "→"), ("rightarrow", "→"), ("leftarrow", "←"), ("Rightarrow", "⇒"), ("implies", "⟹"), ("iff", "⟺"), ("Leftrightarrow", "⇔"),
+        ("leftrightarrow", "↔"), ("mapsto", "↦"), ("neg", "¬"), ("lnot", "¬"), ("land", "∧"), ("wedge", "∧"), ("lor", "∨"), ("vee", "∨"),
+        ("forall", "∀"), ("exists", "∃"), ("emptyset", "∅"), ("varnothing", "∅"), ("infty", "∞"), ("cdot", "·"), ("times", "×"),
+        ("sum", "Σ"), ("prod", "Π"), ("ldots", "…"), ("cdots", "⋯"), ("dots", "…"), ("pm", "±"), ("mid", "|"), ("langle", "⟨"), ("rangle", "⟩"),
+        ("lfloor", "⌊"), ("rfloor", "⌋"), ("lceil", "⌈"), ("rceil", "⌉"), ("circ", "∘"), ("oplus", "⊕"), ("vdash", "⊢"), ("models", "⊨"),
+        ("top", "⊤"), ("bot", "⊥"), ("{", "{"), ("}", "}"), ("%", "%"), ("&", "&"), ("_", "_"), ("#", "#"),
+        (",", " "), (";", " "), (":", " "), ("!", ""), (" ", " "), ("quad", " "), ("qquad", " "), ("left", ""), ("right", ""), ("big", ""), ("Big", ""),
+    ];
+    const BB: &[(char, &str)] = &[('R', "ℝ"), ('N', "ℕ"), ('Z', "ℤ"), ('Q', "ℚ"), ('C', "ℂ"), ('P', "ℙ"), ('E', "𝔼")];
+    let sup = |c: char| "0123456789+-n".find(c).map(|i| ["⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹", "⁺", "⁻", "ⁿ"][i]);
+    let sub = |c: char| "0123456789".find(c).map(|i| ["₀", "₁", "₂", "₃", "₄", "₅", "₆", "₇", "₈", "₉"][i]);
+    let cs: Vec<char> = tex.chars().collect();
+    // a {group} or single char at i -> (its text, next index)
+    fn group(cs: &[char], mut i: usize) -> (String, usize) {
+        while cs.get(i) == Some(&' ') {
+            i += 1;
+        }
+        if cs.get(i) != Some(&'{') {
+            return (cs.get(i).map(|c| c.to_string()).unwrap_or_default(), i + 1);
+        }
+        let mut depth = 0;
+        for (j, &c) in cs.iter().enumerate().skip(i) {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return (cs[i + 1..j].iter().collect(), j + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+        (cs[i + 1..].iter().collect(), cs.len())
+    }
+    let mut out = String::new();
+    let mut i = 0;
+    while i < cs.len() {
+        let c = cs[i];
+        match c {
+            '\\' => {
+                let mut j = i + 1;
+                if cs.get(j).is_some_and(|c| !c.is_alphabetic()) {
+                    j += 1;
+                } else {
+                    while cs.get(j).is_some_and(|c| c.is_alphabetic()) {
+                        j += 1;
+                    }
+                }
+                let cmd: String = cs[i + 1..j].iter().collect();
+                match cmd.as_str() {
+                    "mathrm" | "mathsf" | "mathbf" | "mathit" | "mathtt" | "text" | "textbf" | "textit" | "textsf" | "texttt" | "operatorname" | "boldsymbol" | "mathcal" => {
+                        let (g, n) = group(&cs, j);
+                        out.push_str(&tex_unicode(&g));
+                        i = n;
+                    }
+                    "mathbb" => {
+                        let (g, n) = group(&cs, j);
+                        for ch in g.chars() {
+                            out.push_str(BB.iter().find(|b| b.0 == ch).map(|b| b.1.to_owned()).unwrap_or_else(|| ch.to_string()).as_str());
+                        }
+                        i = n;
+                    }
+                    "frac" | "dfrac" | "tfrac" => {
+                        let (a, n) = group(&cs, j);
+                        let (b, n) = group(&cs, n);
+                        let wrap = |x: String| if x.chars().count() > 1 { format!("({x})") } else { x };
+                        out.push_str(&format!("{}/{}", wrap(tex_unicode(&a)), wrap(tex_unicode(&b))));
+                        i = n;
+                    }
+                    "sqrt" => {
+                        let (a, n) = group(&cs, j);
+                        let a = tex_unicode(&a);
+                        out.push_str(&if a.chars().count() > 1 { format!("√({a})") } else { format!("√{a}") });
+                        i = n;
+                    }
+                    _ => {
+                        match SYM.iter().find(|s| s.0 == cmd) {
+                            Some(s) => out.push_str(s.1),
+                            None => out.push_str(&cmd),
+                        }
+                        i = j;
+                    }
+                }
+            }
+            '^' | '_' => {
+                let (g, n) = group(&cs, i + 1);
+                let g = tex_unicode(&g);
+                let map = if c == '^' { sup } else { sub };
+                let conv: Option<String> = g.chars().map(map).collect();
+                match conv {
+                    Some(u) if !g.is_empty() => out.push_str(&u),
+                    _ if c == '_' && g.chars().count() == 1 => out.push_str(&g), // p_X -> pX reads fine
+                    _ => {
+                        out.push(c);
+                        out.push_str(&if g.chars().count() > 1 { format!("({g})") } else { g });
+                    }
+                }
+                i = n;
+            }
+            '{' | '}' => i += 1,
+            '~' => {
+                out.push(' ');
+                i += 1;
+            }
+            _ => {
+                out.push(c);
+                i += 1;
+            }
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 // --- deck syntax --------------------------------------------------------------
 
 /// What a line's text needs from outside: ref names, and the bits that can't be
@@ -559,6 +705,15 @@ mod tests {
             format!("new{n}")
         };
         text_to_line(&text, &|_| None, &side, &mut nc)
+    }
+
+    #[test]
+    fn tex_reads_as_text() {
+        assert_eq!(tex_unicode(r"\mathrm{Var}[X] = \mathsf{E}[X^2] - \mathsf{E}[X]^2"), "Var[X] = E[X²] - E[X]²");
+        assert_eq!(tex_unicode(r"\sigma_X"), "σX");
+        assert_eq!(tex_unicode(r"2^{10} \le \frac{1}{a}"), "2¹⁰ ≤ 1/a");
+        assert_eq!(tex_unicode(r"f: S \to \mathbb{R}"), "f: S → ℝ");
+        assert_eq!(readable_str("Variance $\\mathrm{Var}[X]$ of [[X]]"), "Variance Var[X] of X");
     }
 
     #[test]

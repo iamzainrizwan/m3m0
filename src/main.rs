@@ -1537,7 +1537,7 @@ impl App {
             };
 
             let db = match &self.data {
-                Some(Ok(d)) => d.db.parent().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                Some(Ok(d)) => d.db.parent().and_then(|p| p.file_name()).map(|n| short_db(&n.to_string_lossy())).unwrap_or_default(),
                 _ => String::new(),
             };
             let err = self.bridge.error.lock().ok().and_then(|e| e.clone());
@@ -1546,7 +1546,7 @@ impl App {
             } else if self.bridge.is_online() {
                 "bridge online".to_owned()
             } else if let Some(e) = err {
-                if e.contains("busy") { "bridge: port busy (another m3m0?)".to_owned() } else { format!("bridge: {}", e.chars().take(40).collect::<String>()) }
+                if e.contains("busy") { "bridge: in use by another m3m0".to_owned() } else { format!("bridge: {}", e.chars().take(40).collect::<String>()) }
             } else {
                 "bridge offline".to_owned()
             };
@@ -1554,6 +1554,15 @@ impl App {
             let rr = p.text(Pos2::new(r.right() - 10.0, r.center().y), Align2::RIGHT_CENTER, right, f.clone(), COMMENT);
             // left text never runs under the right-hand status
             let clip = Rect::from_min_max(Pos2::new(pill.right() + 14.0, r.top()), Pos2::new(rr.left() - 16.0, r.bottom()));
+            // drop whole " · " items from the end until it fits, never cut a word
+            let fits = |t: &str| ctx.fonts(|fo| fo.layout_no_wrap(t.to_owned(), f.clone(), FG_DIM).size().x) <= clip.width();
+            let mut left = left;
+            while !fits(&left) {
+                match left.rfind(" · ") {
+                    Some(i) => left.truncate(i),
+                    None => break,
+                }
+            }
             p.with_clip_rect(clip).text(Pos2::new(pill.right() + 14.0, r.center().y), Align2::LEFT_CENTER, left, f.clone(), FG_DIM);
 
         });
@@ -1799,11 +1808,11 @@ impl App {
                 let n = self.pdfs.files.len();
                 ui.horizontal(|ui| {
                     let name = self.pdfs.files.get(self.pdfs.cur).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "no files".into());
-                    let scope = if self.pdfs.cur < self.pdfs.n_week { "week" } else { "module" };
-                    let ic = self.pdfs.current_kind().map(files::icon).unwrap_or("\u{f15c}");
-                    ui.label(RichText::new(format!("{ic} ")).color(if focused { RED_BRIGHT } else { FG_DIM }));
+                    let scope = if self.pdfs.cur < self.pdfs.n_week { "this week" } else { "module-wide" };
+                    let ic = self.pdfs.current_kind().map(files::icon).unwrap_or("txt ");
+                    ui.label(RichText::new(format!("{ic} ")).size(12.0).color(if focused { RED_BRIGHT } else { FG_DIM }));
                     ui.add(egui::Label::new(RichText::new(name).color(FG_BRIGHT).size(13.0)).truncate());
-                    ui.label(RichText::new(format!("  {}/{} · {scope}", (self.pdfs.cur + 1).min(n), n)).color(COMMENT).size(12.0));
+                    ui.label(RichText::new(format!("  file {}/{} · {scope}", (self.pdfs.cur + 1).min(n), n)).color(COMMENT).size(12.0));
                 });
                 ui.add_space(4.0);
                 self.pdfs.show(ui, &d.kb, &mut self.math);
@@ -2028,7 +2037,8 @@ impl App {
         self.which_key(ctx);
         if let (Overlay::Find { q, items, cur, for_q }, Some(Ok(d))) = (&mut self.overlay, &self.data) {
             if for_q.as_deref() != Some(q.as_str()) {
-                *items = find_items(d, q);
+                let here = self.week.as_ref().and_then(|w| d.kb.module_of(w));
+                *items = find_items(d, q, here.as_deref());
                 *for_q = Some(q.clone());
                 *cur = (*cur).min(items.len().saturating_sub(1));
             }
@@ -2094,10 +2104,21 @@ impl App {
                             }
                             let name = f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                             let rel = f.parent().and_then(|p| p.strip_prefix(&root).ok()).map(|p| p.display().to_string()).unwrap_or_default();
+                            // fixed columns: kind tag · name · folder
                             let r = row(ui, ("pdfpick", i), i == cur, true, 0.0, |ui| {
-                                ui.label(RichText::new(format!("{} ", files::icon(files::kind(f)))).color(if i == open { RED_BRIGHT } else { COMMENT }).size(13.0));
-                                ui.add(egui::Label::new(RichText::new(name).color(if i == cur { FG_BRIGHT } else { FG }).size(13.5)).truncate());
-                                ui.label(RichText::new(format!("   {rel}")).color(COMMENT).size(11.5));
+                                let col = |ui: &mut egui::Ui, w: f32, add: &mut dyn FnMut(&mut egui::Ui)| {
+                                    ui.allocate_ui_with_layout(Vec2::new(w, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                        ui.set_width(w);
+                                        add(ui);
+                                    });
+                                };
+                                col(ui, 48.0, &mut |ui| {
+                                    ui.label(RichText::new(files::icon(files::kind(f))).color(if i == open { RED_BRIGHT } else { COMMENT }).size(12.0));
+                                });
+                                col(ui, 330.0, &mut |ui| {
+                                    ui.add(egui::Label::new(RichText::new(&name).color(if i == cur { FG_BRIGHT } else { FG }).size(13.5)).truncate());
+                                });
+                                ui.add(egui::Label::new(RichText::new(&rel).color(COMMENT).size(11.5)).truncate());
                             });
                             if i == cur {
                                 r.scroll_to_me(None);
@@ -2454,9 +2475,11 @@ fn commit_test(keep: bool) -> i32 {
 }
 
 /// ctrl-t candidates: modules and weeks first, then any rem, by name.
-fn find_items(d: &Loaded, q: &str) -> Vec<(String, String)> {
+/// ctrl-t results: modules, weeks, then any rem; best match first, ties go to the
+/// module you're in (`here`), then shorter names.
+fn find_items(d: &Loaded, q: &str, here: Option<&str>) -> Vec<(String, String)> {
     let ql = q.to_lowercase();
-    let mut out: Vec<(u8, usize, String, String)> = vec![];
+    let mut out: Vec<(u8, bool, usize, String, String)> = vec![];
     let rank = |name: &str| -> Option<u8> {
         let n = name.to_lowercase();
         if ql.is_empty() || n.starts_with(&ql) {
@@ -2472,7 +2495,7 @@ fn find_items(d: &Loaded, q: &str) -> Vec<(String, String)> {
     for m in &d.mods {
         let mn = d.kb.name(m);
         if let Some(r) = rank(&mn) {
-            out.push((r, mn.len(), m.clone(), format!("{mn}  (module)")));
+            out.push((r, Some(m.as_str()) != here, mn.len(), m.clone(), format!("{mn}  (module)")));
         }
         for w in d.kb.children(Some(m)) {
             let wn = d.kb.name(w);
@@ -2481,7 +2504,7 @@ fn find_items(d: &Loaded, q: &str) -> Vec<(String, String)> {
             }
             let full = format!("{mn} / {wn}");
             if let Some(r) = rank(&full).or_else(|| rank(&wn)) {
-                out.push((r, full.len(), w.clone(), full));
+                out.push((r, Some(m.as_str()) != here, full.len(), w.clone(), full));
                 seen.insert(w.clone());
             }
         }
@@ -2491,18 +2514,19 @@ fn find_items(d: &Loaded, q: &str) -> Vec<(String, String)> {
             if seen.contains(id) || d.mods.contains(id) {
                 continue;
             }
-            let n = d.kb.name(id).replace('\n', " ");
+            let n = rich::readable_str(&d.kb.name(id)).replace('\n', " ");
             if n.is_empty() || n.len() > 160 {
                 continue;
             }
             if let Some(r) = rank(&n) {
-                let where_ = d.kb.module_of(id).map(|m| d.kb.name(&m)).unwrap_or_default();
-                out.push((r + 1, n.len(), id.clone(), format!("{n}   · {where_}")));
+                let m = d.kb.module_of(id);
+                let where_ = m.as_ref().map(|m| d.kb.name(m)).unwrap_or_default();
+                out.push((r + 1, m.as_deref() != here, n.len(), id.clone(), format!("{n}   · {where_}")));
             }
         }
     }
     out.sort();
-    out.into_iter().take(14).map(|x| (x.2, x.3)).collect()
+    out.into_iter().take(14).map(|x| (x.3, x.4)).collect()
 }
 
 /// The open page as indented deck-syntax text (chat context).
@@ -2563,4 +2587,12 @@ fn answer(ui: &mut egui::Ui, kb: &Kb, math: &mut math::Math, text: &str) {
 /// "1 change", "3 changes"
 fn plural(n: usize, word: &str) -> String {
     if n == 1 { word.to_owned() } else { format!("{word}s") }
+}
+
+/// "remnote-68dc5b9f7e880c94ac6d230c" -> "remnote-68dc5b9f": the folder name, minus the long id tail
+fn short_db(name: &str) -> String {
+    match name.split_once('-') {
+        Some((a, id)) if id.len() > 12 && id.chars().all(|c| c.is_ascii_hexdigit()) => format!("{a}-{}", &id[..8]),
+        _ => name.to_owned(),
+    }
 }
