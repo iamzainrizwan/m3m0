@@ -97,5 +97,8 @@ writes on a scratch tree (`m3m0 commit-test --keep`, then
 - Every key lives in `src/keys.rs` (the `?` help is tabbed by section,
   opened on the current pane's section; which-key covers prefixes). Add any
   new key there, or it's undiscoverable.
+- He launches from the app grid, where GNOME gives no shell PATH (no
+  ~/.local/bin). Resolve external tools explicitly (see `chat::claude_bin`);
+  test with `PATH=/usr/bin:/bin`.
 - Ask before adding features he didn't list. Lowercase casual voice for any
   user-facing copy.
