@@ -107,6 +107,44 @@ impl App {
         Some(e.id)
     }
 
+    /// Tab / shift-tab on a bullet made in this edit (o/O/enter) whose Create is
+    /// still the last op: re-stage the Create under the new parent, keep editing.
+    fn move_created(&mut self, d: &mut Loaded, indent: bool) -> bool {
+        let Some(e) = &self.editing else { return false };
+        if !e.created {
+            return false;
+        }
+        let id = e.id.clone();
+        let Some(Op::Create { id: cid, line, .. }) = self.changes.ops.last() else { return false };
+        if *cid != id {
+            return false;
+        }
+        let line = line.clone();
+        let Some((p, pos)) = Self::parent_pos(d, &id) else { return false };
+        let to = if indent {
+            if pos == 0 {
+                self.msg = Some("nothing above to indent under".into());
+                return true;
+            }
+            let prev = d.kb.children(Some(&p))[pos - 1].clone();
+            self.folded.remove(&prev);
+            let n = d.kb.children(Some(&prev)).len();
+            (prev, n)
+        } else {
+            if Some(&p) == self.week.as_ref() {
+                self.msg = Some("already at the top level of this page".into());
+                return true;
+            }
+            let Some((gp, ppos)) = Self::parent_pos(d, &p) else { return false };
+            (gp, ppos + 1)
+        };
+        self.changes.undo(&mut d.kb);
+        self.changes.redo.clear();
+        self.changes.apply(&mut d.kb, Op::Create { id: id.clone(), parent: to.0, pos: to.1, line });
+        self.cursor_to(d, &id);
+        true
+    }
+
     fn parent_pos(d: &Loaded, id: &str) -> Option<(String, usize)> {
         let p = d.kb.q.get(id)?.get("parent")?.as_str()?.to_owned();
         let pos = d.kb.children(Some(&p)).iter().position(|k| k == id)?;
@@ -327,6 +365,10 @@ impl App {
                 }
             }
             K::Tab | K::ShiftTab => {
+                // a fresh bullet: move it by re-staging its Create (saving it would drop it if empty)
+                if self.move_created(d, matches!(k, K::Tab)) {
+                    return;
+                }
                 let at_end = true;
                 if let Some(id) = self.finish_edit(d) {
                     if matches!(k, K::Tab) {
