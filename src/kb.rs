@@ -204,3 +204,55 @@ impl Kb {
             .collect()
     }
 }
+
+// --- lines (rich model) -----------------------------------------------------------
+
+impl Kb {
+    pub fn is_multiline(&self, i: &str) -> bool {
+        self.children(Some(i)).iter().any(|k| {
+            let d = &self.q[k];
+            d.get("tp").and_then(|t| t.get(CARD_ITEM)).is_some() || d.pointer("/apu/w/v").and_then(Value::as_bool) == Some(true)
+        })
+    }
+
+    pub fn line_of(&self, i: &str) -> crate::rich::Line {
+        use crate::rich::{parse_rt, Kind, Line};
+        let d = &self.q[i];
+        let front = parse_rt(d.get("key"));
+        let back = parse_rt(d.get("value"));
+        let has_value = d.get("value").is_some_and(|v| !v.is_null());
+        let kind = if d.pointer("/apu/cd/v").and_then(Value::as_bool) == Some(true) {
+            Kind::Code
+        } else if let Some(h) = self.heading(i) {
+            Kind::Heading(h.max(1))
+        } else {
+            match d.get("type").and_then(Value::as_i64) {
+                Some(1) => Kind::Concept,
+                Some(2) => Kind::Descriptor,
+                _ if self.is_multiline(i) => Kind::MultiLine,
+                _ if has_value && d.get("enableBackSR").and_then(Value::as_bool) == Some(true) => Kind::Both,
+                _ if has_value => Kind::Basic,
+                _ => Kind::Plain,
+            }
+        };
+        Line { kind, front, back }
+    }
+
+    /// Rem id for a [[name]]: exact name match, preferring rems under `near`'s module.
+    pub fn resolve(&self, name: &str, near: Option<&str>) -> Option<String> {
+        let hits: Vec<&String> = self.q.keys().filter(|k| self.name(k) == name).collect();
+        let module = near.and_then(|n| self.module_of(n));
+        hits.iter().find(|h| module.is_some() && self.module_of(h) == module).or(hits.first()).map(|s| (*s).clone())
+    }
+
+    pub fn module_of(&self, i: &str) -> Option<String> {
+        let mut cur = i.to_owned();
+        loop {
+            let p = self.q.get(&cur)?.get("parent").and_then(Value::as_str)?.to_owned();
+            if self.q.get(&p).is_some_and(|d| d.get("parent").is_none_or(Value::is_null)) {
+                return Some(p);
+            }
+            cur = p;
+        }
+    }
+}

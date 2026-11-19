@@ -3,6 +3,7 @@ mod bridge;
 mod config;
 mod icon;
 mod kb;
+mod rich;
 mod theme;
 
 use config::Config;
@@ -16,6 +17,9 @@ use theme::*;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("roundtrip") {
+        std::process::exit(roundtrip());
+    }
     if args.get(1).map(String::as_str) == Some("bridge-test") {
         if let Err(e) = bridge::test(&args[2..]) {
             eprintln!("bridge-test: {e}");
@@ -1047,4 +1051,37 @@ fn shots(ctx: &egui::Context) {
         ctx.data_mut(|d| d.insert_temp(id, n + 1));
     }
     ctx.request_repaint();
+}
+
+/// `m3m0 roundtrip`: every rem -> editable text -> back, compared with the DB.
+/// Editing a line must never change what we didn't touch.
+fn roundtrip() -> i32 {
+    let Some(db) = kb::resolve_db(Config::load().db.as_deref()) else { return 2 };
+    let kb = match Kb::load(&db) {
+        Ok(k) => k,
+        Err(e) => {
+            eprintln!("{e}");
+            return 2;
+        }
+    };
+    let name = |id: &str| kb.name(id);
+    let (mut ok, mut bad) = (0, 0);
+    for id in kb.q.keys() {
+        let line = kb.line_of(id);
+        let mut side = rich::Side::default();
+        let text = rich::line_to_text(&line, &name, &mut side);
+        let back = rich::text_to_line(&text, &|n| kb.resolve(n, Some(id)), &side, &mut || "NEW".into());
+        let same = back.kind == line.kind && rich::to_rt(&back.front) == rich::to_rt(&line.front) && rich::to_rt(&back.back) == rich::to_rt(&line.back);
+        if same {
+            ok += 1;
+        } else {
+            bad += 1;
+            if bad <= 15 {
+                let cut = |v: serde_json::Value| { let s = v.to_string(); s.chars().take(240).collect::<String>() };
+                println!("--- {id} {:?} -> {:?}\n text  {}\n front {} -> {}\n back  {} -> {}", line.kind, back.kind, text.chars().take(200).collect::<String>(), cut(rich::to_rt(&line.front)), cut(rich::to_rt(&back.front)), cut(rich::to_rt(&line.back)), cut(rich::to_rt(&back.back)));
+            }
+        }
+    }
+    println!("{ok} ok, {bad} differ");
+    (bad > 0) as i32
 }
