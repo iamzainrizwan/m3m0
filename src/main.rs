@@ -1379,6 +1379,7 @@ impl eframe::App for App {
                             ks.push(match c {
                                 '~' => K::Ctrl(it.next().unwrap_or(' ')),
                                 '\n' => K::Enter,
+                                '\t' => K::Tab,
                                 '\u{1b}' => K::Esc,
                                 c => K::Ch(c),
                             });
