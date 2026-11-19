@@ -23,20 +23,30 @@ Every decision and the reason for it: `docs/design.md`.
 
 ## Layout
 
-- `src/main.rs`: app state, keys (vim nav), panels, overlays, preview hooks
+- `src/main.rs`: app state, focus model, normal-mode keys, panels (tree,
+  notes, pdf, chat), overlays (help, find, db, diff, log, link picker),
+  deferred actions, preview hooks, `roundtrip` / `commit-test` subcommands
+- `src/keys.rs`: **every key** (drives the `?` reference, which-key popup and
+  status hints). Add new keys here.
 - `src/kb.rs`: read model of the RemNote DB (snapshot via SQLite backup API),
-  DB discovery (`find_dbs`, `resolve_db`)
-- `src/boot.rs`: boot animation + the dot-matrix logo (`GLYPHS`)
-- `src/icon.rs`: app icon drawn from `GLYPHS`; `m3m0 --install` writes the icon
-  and `~/.local/share/applications/m3m0.desktop`
-- `src/theme.rs`: rice palette (`~/rice/palette.md`) and BlexMono fonts
-- `src/config.rs`: `~/.config/m3m0/config.json` (zoom, sidebar, db)
-- `src/bridge.rs`: websocket server + plugin file server for the RemNote
-  plugin; `m3m0 bridge-test` spike
-- `plugin/`: the RemNote plugin (TypeScript, from remnote's react template)
-- `spikes/`: phase 0 experiments (math rendering, PDF rendering); standalone
-  crates, not workspace members
-- `docs/`: design, plan, RemNote storage notes, bridge protocol, spike results
+  `line_of`, `resolve`, card docs, DB discovery
+- `src/rich.rs`: rich text <-> spans <-> editable deck syntax (lossless;
+  `m3m0 roundtrip` must report 0 differ over the whole DB)
+- `src/render.rs`: own line layout (per-row baselines), inline KaTeX, refs
+- `src/math.rs`: RaTeX -> texture cache (KaTeX fonts, 1.21em, baseline-aligned)
+- `src/edit.rs`: staged ops (Create/Update/Delete/Move), undo/redo
+- `src/editor.rs`: insert mode, structure ops, `[[` autocomplete
+- `src/commit.rs`: ops -> bridge calls, tmp id mapping, commit log
+- `src/bridge.rs`: plugin HTTP server + websocket worker, RemNote launch/stop
+- `src/pdf.rs`: week PDFs from uni-git, hayro render worker
+- `src/graph.rs`: graph view (pages/terms/citations, m3m0 look)
+- `src/deck.rs` + `src/cards.rs`: Claude decks, pairing, links, cards view
+- `src/chat.rs`: `claude -p` chat panel
+- `src/review.rs`: due queue + grading through the bridge
+- `src/boot.rs`, `src/icon.rs`, `src/theme.rs`, `src/config.rs`
+- `plugin/`: the RemNote plugin (TypeScript)
+- `scripts/preview.sh`: frames on the secondary monitor (XWayland)
+- `spikes/`: phase 0 experiments; `docs/`: design, plan, storage, bridge
 
 ## Build, run, preview
 
@@ -50,9 +60,14 @@ Dev env vars: `M3M0_DB` (db path), `M3M0_OPEN="FC2/Week 8"` (open a week),
 `M3M0_SHOTS=DIR` (save frames at fixed times, then quit; real keys ignored),
 `M3M0_DEBUG` (log keys), `M3M0_PLUGIN_DIST`.
 
-**Show Zain the result, don't describe it.** Capture with `M3M0_SHOTS` and put
-previews in `~/Documents/claude/m3m0/` (montage for contact sheets). The
-window opens maximised on whichever monitor GNOME picks, so note the size.
+**Show Zain the result, don't describe it.** Use `scripts/preview.sh OUT
+[MODULE/Week N] [KEYS]`: a laptop-sized window on the secondary monitor,
+never his main display; previews never read or write his config.
+`M3M0_LAST=40` delays the last frame (chat answers), `M3M0_OPEN_ID` opens any
+rem as the page. Previews go in `~/Documents/claude/m3m0/`.
+**Never replay grade keys (1-4) in review or `:w` on real notes**; test
+writes on a scratch tree (`m3m0 commit-test --keep`, then
+`m3m0 bridge-test --cleanup ID`).
 
 ## Rules
 

@@ -58,10 +58,13 @@ know writing to the remnote database can be a biatch".
 
 ## graph
 
-Start with `remnote_vault.py`'s node model (modules → weeks → headings →
-concepts/refs, one colour per module, hue family per semester). Force layout,
-click to open in the editor, module/week filters, local graph of the current
-note.
+Rebuilt from scratch on request (not remnote_vault.py's model). Nodes: pages
+(weeks), terms (`::` concepts) and anything [[referenced]]. Edges: term ->
+its page, and every [[ref]] from where it's used -> its target, weighted.
+Look: dot-matrix squares (pages hollow white, terms grey sized by citations),
+cross-module links red, module names dim over their clusters; gravity pulls
+each module to its own spot so modules form islands. Keyboard: hjkl
+directional select, tab walks links, / search, L local, f module filter.
 
 ## flashcards
 
@@ -75,7 +78,8 @@ note.
 
 ## claude chat
 
-- Shells out to `claude -p` (his plan, no API key).
+- Shells out to `claude -p` (his plan, no API key), prompt on stdin,
+  `--setting-sources ""` so his Discord/screensaver hooks don't fire.
 - Context: the whole module (`uni-git/<module>`) plus the current note and
   week's PDFs.
 - May answer questions and edit Claude's own material (`<module>/revision/`),

@@ -4,15 +4,20 @@ Build hours are Claude's; "you" = Zain's testing time. Commit + push after each.
 
 | # | phase | status |
 |---|---|---|
-| 0 | spikes: plugin bridge, KaTeX look, PDF renderer (~3h, you 0.5h) | math ✓ RaTeX, pdf ✓ hayro, bridge ✓ 6/6 (see bridge.md); left: `>>>` review check on the phone |
-| 1 | skeleton + read model: rice theme, KB port, module/week tree (~3h) | ✓ plus boot anim, vim nav, titlebar, icon, :db |
-| 2 | outliner editor: vim modes, indent, collapse, all syntax, `[[ref]]` autocomplete, KaTeX inline (~8h, you 1h) | |
-| 3 | changesets: staged diff, commit via bridge, log, revert, backup, commit wins (~5h) | |
-| 4 | PDF panel: week PDFs from `weeks/` + `sources/`, side by side (~3h) | |
-| 5 | graph: remnote_vault.py nodes/colours, force layout, filters, local graph (~4h) | |
-| 6 | Claude deck comparison: gaps, link keybind, stage into notes (~4h) | |
-| 7 | chat panel: `claude -p`, module context, edits only `revision/` (~3h) | |
-| 8 | review: RemNote default scheduler from history, write back (~5h, you 1h) | |
+| 0 | spikes: plugin bridge, KaTeX look, PDF renderer | done: RaTeX, hayro, bridge 6/6 |
+| 1 | skeleton + read model | done: boot anim, vim nav, titlebar, icon, :db |
+| 2 | outliner editor | done: insert mode, o/O, dd, >>/<<, alt-j/k, undo, [[ autocomplete, katex; lossless round-trip over all 3700 rems |
+| 3 | changesets + commit | done: :w diff, :w!, :log revert, tmp id mapping; verified against RemNote (commit-test + UI path) |
+| 4 | PDF panel | done: week + module PDFs, hayro worker, page/file keys |
+| 5 | graph | done, rebuilt as asked: pages/terms/citations, m3m0 look, module islands, tab walks links, / search |
+| 6 | Claude deck comparison | done: cards view, gaps, gl link, s stage |
+| 7 | chat panel | done: claude -p, page + module context, edits only revision/ |
+| 8 | review | done: due queue, grading via RemNote's scheduler (bridge); not exercised on real cards |
 
-Also pending: on launch, start the plugin server first, then start (or restart) RemNote hidden, and wait for sync; rem →
-uni-git mapping override file.
+Open / next:
+- RemNote starts on demand (commit, review, `:remnote`), not at launch, and
+  not hidden (no Wayland way to hide another app's window).
+- Multiple-choice writes: need one sample MCQ card to learn the encoding.
+- Turning a rem into a code block isn't possible through the plugin SDK.
+- Images show as `[image]`; real image rendering isn't built.
+- rem -> uni-git mapping is by name only (no override file yet).
