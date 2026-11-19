@@ -176,6 +176,8 @@ pub const HELP: &[Group] = &[
             (":reload / :e", "re-read RemNote (refuses with staged changes)"),
             (":zoom 130", "set zoom (also ctrl +/-)"),
             (":find", "same as ctrl-t"),
+            (":remnote", "start RemNote (the sync engine) if it isn't running"),
+            (":remnote restart", "restart it so it loads the bridge plugin from m3m0"),
             (":help", "this reference"),
         ],
     },

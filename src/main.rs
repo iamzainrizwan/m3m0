@@ -1132,6 +1132,18 @@ impl App {
                 }
                 self.deferred.push(Deferred::Review(arg.map(str::to_owned)));
             }
+            (Some("remnote"), arg) => {
+                let restart = arg == Some("restart");
+                if restart && bridge::remnote_running() {
+                    bridge::stop_remnote();
+                    std::thread::sleep(std::time::Duration::from_millis(1500));
+                }
+                self.msg = Some(match (bridge::remnote_running(), bridge::launch_remnote()) {
+                    (true, _) => "RemNote is already running (:remnote restart to reload the plugin)".into(),
+                    (false, Ok(())) => "starting RemNote: the bridge comes online when it has loaded".into(),
+                    (false, Err(e)) => e,
+                });
+            }
             (Some("find" | "f"), _) => self.overlay = Overlay::Find { q: String::new(), items: vec![], cur: 0, for_q: None },
             (Some(""), _) | (None, _) => {}
             (Some(c), _) => self.msg = Some(format!("not a command: {c}")),

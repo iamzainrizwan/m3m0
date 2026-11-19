@@ -338,3 +338,8 @@ pub fn launch_remnote() -> Result<(), String> {
         Err("couldn't start RemNote (flatpak com.remnote.RemNote)".into())
     }
 }
+
+/// Quit RemNote (flatpak) so it can be relaunched and load the plugin from m3m0.
+pub fn stop_remnote() -> bool {
+    std::process::Command::new("flatpak").args(["kill", "com.remnote.RemNote"]).status().map(|s| s.success()).unwrap_or(false)
+}
