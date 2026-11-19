@@ -1,0 +1,11 @@
+[package]
+name = "m3m0"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = "0.31"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+rusqlite = { version = "0.43.0", features = ["bundled", "backup"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
