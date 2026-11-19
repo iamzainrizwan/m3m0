@@ -1,5 +1,6 @@
 mod boot;
 mod cards;
+mod chat;
 mod bridge;
 mod commit;
 mod config;
@@ -99,6 +100,7 @@ enum Focus {
     Tree,
     Notes,
     Pdf,
+    Chat,
 }
 
 enum Overlay {
@@ -174,6 +176,7 @@ struct App {
     cards: Option<cards::CardsView>,
     graph_anchor: Option<usize>,
     deferred: Vec<Deferred>,
+    chat: chat::Chat,
     last_search: Option<String>,
     links: std::collections::HashMap<String, String>,
 }
@@ -299,6 +302,7 @@ impl App {
             cards: None,
             graph_anchor: None,
             deferred: vec![],
+            chat: chat::Chat::default(),
             last_search: None,
             links: deck::load_links(),
         }
@@ -384,7 +388,9 @@ impl App {
         let mut taken = self.data.take();
         self.reloaded = false;
         if let Some(Ok(d)) = &mut taken {
-            if self.editing.is_some() {
+            if self.focus == Focus::Chat && self.cfg.chat_open && matches!(self.overlay, Overlay::None) {
+                self.handle_chat(ctx, d, k);
+            } else if self.editing.is_some() {
                 self.handle_insert(d, k);
             } else {
                 self.handle_loaded(ctx, d, k);
@@ -459,7 +465,18 @@ impl App {
                 return;
             }
         }
+        if let K::Ctrl('a') = k {
+            self.cfg.chat_open = !self.cfg.chat_open;
+            if self.cfg.chat_open {
+                self.cfg.pdf_open = false;
+                self.focus = Focus::Chat;
+            } else {
+                self.focus = Focus::Notes;
+            }
+            return;
+        }
         if let K::Ctrl('p') = k {
+            self.cfg.chat_open = false;
             self.cfg.pdf_open = !self.cfg.pdf_open;
             self.focus = if self.cfg.pdf_open { Focus::Pdf } else { Focus::Notes };
             return;
@@ -533,7 +550,7 @@ impl App {
                         self.scroll_tree = true;
                     }
                 }
-                Focus::Pdf => {}
+                Focus::Pdf | Focus::Chat => {}
                 Focus::Notes => {
                     if let Some((id, depth)) = nrows.get(self.note_cur).cloned() {
                         if self.folded.remove(&id) {
@@ -559,7 +576,7 @@ impl App {
                         self.scroll_tree = true;
                     }
                 }
-                Focus::Pdf => self.focus = Focus::Notes,
+                Focus::Pdf | Focus::Chat => self.focus = Focus::Notes,
                 Focus::Notes => match nrows.get(self.note_cur) {
                     Some((_, 0)) | None => {
                         if self.cfg.sidebar_open {
@@ -583,6 +600,9 @@ impl App {
         self.focus = match self.focus {
             Focus::Tree => Focus::Notes,
             Focus::Notes if self.cfg.pdf_open => Focus::Pdf,
+            Focus::Notes if self.cfg.chat_open => Focus::Chat,
+            Focus::Chat if self.cfg.sidebar_open => Focus::Tree,
+            Focus::Chat => Focus::Notes,
             Focus::Notes | Focus::Pdf if self.cfg.sidebar_open => Focus::Tree,
             Focus::Pdf => Focus::Notes,
             f => f,
@@ -747,7 +767,7 @@ impl App {
     fn mv(&mut self, by: isize, tn: usize, nn: usize) {
         let (cur, len, flag) = match self.focus {
             Focus::Tree => (&mut self.tree_cur, tn, &mut self.scroll_tree),
-            Focus::Notes | Focus::Pdf => (&mut self.note_cur, nn, &mut self.scroll_notes),
+            Focus::Notes | Focus::Pdf | Focus::Chat => (&mut self.note_cur, nn, &mut self.scroll_notes),
         };
         if len > 0 {
             *cur = (*cur as isize + by).clamp(0, len as isize - 1) as usize;
@@ -758,7 +778,7 @@ impl App {
     fn jump(&mut self, to: usize, tn: usize, nn: usize) {
         match self.focus {
             Focus::Tree => self.tree_cur = to.min(tn.saturating_sub(1)),
-            Focus::Notes | Focus::Pdf => self.note_cur = to.min(nn.saturating_sub(1)),
+            Focus::Notes | Focus::Pdf | Focus::Chat => self.note_cur = to.min(nn.saturating_sub(1)),
         }
         self.scroll_tree = true;
         self.scroll_notes = true;
@@ -1116,7 +1136,13 @@ impl eframe::App for App {
         }
 
         if self.boot.finished {
-            let mut ks = if self.editing.is_some() { self.insert_keys(ctx) } else { self.keys(ctx) };
+            let mut ks = if self.editing.is_some() {
+                self.insert_keys(ctx)
+            } else if self.focus == Focus::Chat && self.cfg.chat_open {
+                self.chat_keys(ctx)
+            } else {
+                self.keys(ctx)
+            };
             if std::env::var("M3M0_SHOTS").is_ok() {
                 ks.clear(); // previews: only replayed keys
             }
@@ -1219,6 +1245,7 @@ impl eframe::App for App {
 
         self.sidebar(ctx, data);
         self.pdf_panel(ctx, data);
+        self.chat_panel(ctx, data);
         self.notes(ctx, data);
         self.boot.show(ctx, Some(&data.log), BAR_LOGO);
         self.data = taken;
@@ -1297,6 +1324,7 @@ impl App {
                 (_, Focus::Tree) => (" TREE ", RED),
                 (_, Focus::Notes) => (" NOTES ", RED),
                 (_, Focus::Pdf) => (" PDF ", RED),
+                (_, Focus::Chat) => (" CHAT ", RED_BRIGHT),
             };
             let pill = p.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, mode, f.clone(), BG);
             p.rect_filled(pill.expand2(Vec2::new(2.0, 3.0)), 0.0, col);
@@ -1388,6 +1416,165 @@ impl App {
                     if resp.dragged() {
                         if let Some(x) = ctx.pointer_interact_pos() {
                             self.cfg.sidebar_w = (x.x - pr.left()).clamp(SIDEBAR_MIN, SIDEBAR_MAX);
+                        }
+                    }
+                });
+            }
+        }
+    }
+
+    /// Keys while typing in the chat box: ours are esc / enter / scroll / new chat.
+    fn chat_keys(&mut self, ctx: &egui::Context) -> Vec<K> {
+        let mut out = vec![];
+        ctx.input_mut(|i| {
+            i.events.retain(|e| {
+                let egui::Event::Key { key, pressed, modifiers, .. } = e else { return true };
+                let k = match key {
+                    egui::Key::Escape => Some(K::Esc),
+                    egui::Key::Enter if !modifiers.shift => Some(K::Enter),
+                    egui::Key::Tab if !modifiers.shift => Some(K::Tab),
+                    egui::Key::D | egui::Key::U | egui::Key::N | egui::Key::A | egui::Key::P | egui::Key::B | egui::Key::G | egui::Key::F | egui::Key::T if modifiers.ctrl => {
+                        Some(K::Ctrl(key.name().to_ascii_lowercase().chars().next().unwrap()))
+                    }
+                    _ => None,
+                };
+                match k {
+                    Some(k) => {
+                        if *pressed {
+                            out.push(k);
+                        }
+                        false
+                    }
+                    None => true,
+                }
+            });
+        });
+        out
+    }
+
+    fn handle_chat(&mut self, ctx: &egui::Context, d: &mut Loaded, k: K) {
+        match k {
+            // only replayed keys (M3M0_KEYS) arrive as Ch here: type them
+            K::Ch(c) => self.chat.input.push(c),
+            K::Esc => self.focus = Focus::Notes,
+            K::Tab => self.toggle_focus(),
+            K::Enter => {
+                let Some(w) = self.week.clone() else {
+                    self.msg = Some("open a week first: the chat is about its module".into());
+                    return;
+                };
+                let module = d.kb.module_of(&w).map(|m| d.kb.name(&m)).or_else(|| d.mods.contains(&w).then(|| d.kb.name(&w))).unwrap_or_default();
+                if module.is_empty() {
+                    self.msg = Some("this page isn't under a module".into());
+                    return;
+                }
+                let context = page_text(&d.kb, &w);
+                let rc = ctx.clone();
+                self.chat.send(&module, &context, move || rc.request_repaint());
+            }
+            K::Ctrl('n') => {
+                self.chat.reset();
+                self.msg = Some("new chat".into());
+            }
+            K::Ctrl('d') | K::Ctrl('u') => {
+                let by = if matches!(k, K::Ctrl('d')) { 300.0 } else { -300.0 };
+                ctx.data_mut(|m| {
+                    let v: f32 = m.get_temp(egui::Id::new("chat-scroll")).unwrap_or(0.0);
+                    m.insert_temp(egui::Id::new("chat-scroll"), (v + by).max(0.0));
+                });
+                self.chat.scroll_end = false;
+            }
+            // global toggles still work from the chat box
+            K::Ctrl('a') | K::Ctrl('p') | K::Ctrl('b') | K::Ctrl('g') | K::Ctrl('f') | K::Ctrl('t') => {
+                self.focus = Focus::Notes;
+                self.handle_loaded(ctx, d, k);
+            }
+            _ => {}
+        }
+    }
+
+    fn chat_panel(&mut self, ctx: &egui::Context, d: &Loaded) {
+        self.chat.poll();
+        let focused = self.focus == Focus::Chat;
+        let math = &mut self.math;
+        let chat = &mut self.chat;
+        let w = self.cfg.chat_w;
+        let panel = egui::SidePanel::right("chat")
+            .resizable(false)
+            .exact_width(w)
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin { left: 10, right: 10, top: 8, bottom: 8 }))
+            .show_animated(ctx, self.cfg.chat_open, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("\u{f075} claude").color(if focused { RED_BRIGHT } else { FG_DIM }).family(bold()).size(13.5));
+                    let m = chat.module.clone().unwrap_or_else(|| "asks about the open module".into());
+                    ui.label(RichText::new(format!("  {m}")).color(COMMENT).size(12.0));
+                });
+                ui.add_space(6.0);
+                let input_h = 84.0;
+                let avail = ui.available_height() - input_h - 10.0;
+                let mut sa = egui::ScrollArea::vertical().id_salt("chat-msgs").max_height(avail).auto_shrink(false);
+                if chat.scroll_end {
+                    sa = sa.vertical_scroll_offset(1.0e9);
+                    chat.scroll_end = false;
+                } else if let Some(off) = ui.ctx().data(|m| m.get_temp::<f32>(egui::Id::new("chat-scroll"))) {
+                    sa = sa.vertical_scroll_offset(off);
+                    ui.ctx().data_mut(|m| m.remove::<f32>(egui::Id::new("chat-scroll")));
+                }
+                sa.show(ui, |ui| {
+                    if chat.msgs.is_empty() {
+                        ui.label(RichText::new("ask about this week: claude sees the page you're on and the module's slides, PDFs and decks.\nenter send · shift-enter newline · ctrl-n new chat · esc back to notes").color(COMMENT).size(12.5));
+                    }
+                    for m in &chat.msgs {
+                        ui.add_space(8.0);
+                        ui.label(RichText::new(if m.user { "you" } else { "claude" }).color(if m.user { RED } else { FG_DIM }).size(11.5).family(bold()));
+                        if m.user {
+                            ui.add(egui::Label::new(RichText::new(&m.text).color(FG_BRIGHT).size(NOTE_TEXT - 1.0)).wrap());
+                        } else {
+                            answer(ui, &d.kb, math, &m.text);
+                        }
+                    }
+                });
+                ui.add_space(6.0);
+                let status = chat.status.clone().unwrap_or_default();
+                if !status.is_empty() {
+                    ui.label(RichText::new(status).color(RED_BRIGHT).size(11.5));
+                }
+                let id = egui::Id::new("chat-input");
+                let out = egui::TextEdit::multiline(&mut chat.input)
+                    .id(id)
+                    .hint_text(RichText::new("ask claude…").color(COMMENT))
+                    .font(FontId::monospace(NOTE_TEXT - 1.0))
+                    .desired_rows(3)
+                    .desired_width(f32::INFINITY)
+                    .show(ui);
+                if focused && !out.response.has_focus() {
+                    out.response.request_focus();
+                }
+                if !focused && out.response.has_focus() {
+                    out.response.surrender_focus();
+                }
+                if out.response.clicked() {
+                    // clicking the box focuses the chat
+                    chat.focus_input = true;
+                }
+            });
+        if self.chat.focus_input {
+            self.chat.focus_input = false;
+            self.focus = Focus::Chat;
+        }
+        if let Some(ir) = panel {
+            let pr = ir.response.rect;
+            if self.cfg.chat_open {
+                let h = Rect::from_min_max(Pos2::new(pr.left() - 3.0, pr.top()), Pos2::new(pr.left() + 3.0, pr.bottom()));
+                egui::Area::new(egui::Id::new("chat-handle")).order(egui::Order::Foreground).fixed_pos(h.min).show(ctx, |ui| {
+                    let (rect, resp) = ui.allocate_exact_size(h.size(), Sense::drag());
+                    if resp.hovered() || resp.dragged() {
+                        ctx.set_cursor_icon(CursorIcon::ResizeHorizontal);
+                        ui.painter().rect_filled(Rect::from_center_size(rect.center(), Vec2::new(2.0, rect.height())), 0.0, RED);
+                    }
+                    if resp.dragged() {
+                        if let Some(x) = ctx.pointer_interact_pos() {
+                            self.cfg.chat_w = (pr.right() - x.x).clamp(320.0, 1200.0);
                         }
                     }
                 });
@@ -1591,6 +1778,8 @@ impl App {
             "tree"
         } else if self.focus == Focus::Pdf {
             "pdf"
+        } else if self.focus == Focus::Chat {
+            "chat"
         } else if self.cards.is_some() {
             "cards"
         } else if self.view_graph {
@@ -1867,7 +2056,9 @@ fn edge_resize(ctx: &egui::Context) {
 /// M3M0_KEYS="jjl..." replays keys after boot (so previews can show navigation).
 fn shots(ctx: &egui::Context) {
     let Ok(dir) = std::env::var("M3M0_SHOTS") else { return };
-    const AT: [f64; 10] = [0.25, 0.7, 1.1, 1.45, 1.6, 1.85, 2.3, 2.9, 3.25, 5.5];
+    let last: f64 = std::env::var("M3M0_LAST").ok().and_then(|v| v.parse().ok()).unwrap_or(5.5);
+    #[allow(non_snake_case)]
+    let AT: [f64; 10] = [0.25, 0.7, 1.1, 1.45, 1.6, 1.85, 2.3, 2.9, 3.25, last];
     let t = ctx.input(|i| i.time);
     let id = egui::Id::new("shot-n");
     let n: usize = ctx.data(|d| d.get_temp(id)).unwrap_or(0);
@@ -2052,4 +2243,59 @@ fn find_items(d: &Loaded, q: &str) -> Vec<(String, String)> {
     }
     out.sort();
     out.into_iter().take(14).map(|x| (x.2, x.3)).collect()
+}
+
+/// The open page as indented deck-syntax text (chat context).
+fn page_text(kb: &Kb, page: &str) -> String {
+    let mut out = format!("# {}\n", kb.name(page));
+    for (id, depth) in note_rows(kb, page, &HashSet::new()) {
+        let mut side = rich::Side::default();
+        let t = rich::line_to_text(&kb.line_of(&id), &|r| kb.name(r), &mut side);
+        out.push_str(&format!("{}- {}\n", "  ".repeat(depth), t));
+    }
+    out
+}
+
+/// Draw a chat answer: paragraphs with inline LaTeX, ``` code blocks.
+fn answer(ui: &mut egui::Ui, kb: &Kb, math: &mut math::Math, text: &str) {
+    let mut code: Option<String> = None;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            match code.take() {
+                Some(c) => {
+                    egui::Frame::new().fill(BG_ALT).stroke((1.0, GREY0)).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(egui::Label::new(RichText::new(c.trim_end()).monospace().size(NOTE_TEXT - 2.5).color(FG)).wrap());
+                    });
+                }
+                None => code = Some(String::new()),
+            }
+            continue;
+        }
+        if let Some(c) = &mut code {
+            c.push_str(line);
+            c.push('\n');
+            continue;
+        }
+        if line.trim().is_empty() {
+            ui.add_space(6.0);
+            continue;
+        }
+        let (bullet, body) = match line.trim_start().strip_prefix("- ").or_else(|| line.trim_start().strip_prefix("* ")) {
+            Some(b) => (Some(("•", RED)), b),
+            None => (None, line),
+        };
+        let (size, body, bold) = match body.strip_prefix("### ").or_else(|| body.strip_prefix("## ")).or_else(|| body.strip_prefix("# ")) {
+            Some(h) => (NOTE_TEXT, h, true),
+            None => (NOTE_TEXT - 1.0, body, false),
+        };
+        let spans = rich::inline(body, &|_| None, &rich::Side::default(), &mut || "c".into());
+        let l = rich::Line { kind: rich::Kind::Plain, front: spans, back: vec![] };
+        ui.horizontal_top(|ui| {
+            render::line(ui, kb, math, &l, &render::Style { size, color: FG, bold, bullet });
+        });
+    }
+    if let Some(c) = code {
+        ui.add(egui::Label::new(RichText::new(c).monospace().size(NOTE_TEXT - 2.5).color(FG)).wrap());
+    }
 }

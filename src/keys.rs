@@ -21,6 +21,7 @@ pub const HELP: &[Group] = &[
             ("ctrl-p", "show / hide the week's PDFs (focuses them)"),
             ("ctrl-g", "graph view on / off"),
             ("ctrl-f", "cards view: yours vs claude's deck"),
+            ("ctrl-a", "ask claude: chat panel about the open module"),
             ("ctrl-j / ctrl-k", "next / previous week (across modules)"),
             ("ctrl-o", "jump back (after gd, a graph or search jump)"),
             ("ctrl + / ctrl - / ctrl 0", "zoom in / out / reset (saved)"),
@@ -145,6 +146,17 @@ pub const HELP: &[Group] = &[
         ],
     },
     Group {
+        title: "chat (ctrl-a)",
+        keys: &[
+            ("enter", "send (claude sees this page + the module's files)"),
+            ("shift-enter", "newline"),
+            ("ctrl-d / ctrl-u", "scroll the conversation"),
+            ("ctrl-n", "new conversation"),
+            ("esc / tab", "back to notes / next pane"),
+            ("(claude may edit)", "only its own decks in revision/, when you ask"),
+        ],
+    },
+    Group {
         title: "commands (:)",
         keys: &[
             (":q", "quit"),
@@ -193,6 +205,7 @@ pub fn hint(ctx: &str) -> &'static str {
         "pdf" => "j/k scroll · J/K page · ]/[ file · +/- zoom · h notes",
         "graph" => "hjkl move · tab links · / find · enter open · L local · f module",
         "cards" => "h/l column · ]/[ gaps · enter open · gl link · s stage",
+        "chat" => "enter send · shift-enter newline · ctrl-n new chat · esc notes",
         _ => "",
     }
 }
