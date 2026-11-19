@@ -149,6 +149,7 @@ pub const HELP: &[Group] = &[
             ("j / k  gg / G  ctrl-d / u", "move"),
             ("] / [", "next / previous gap in this column"),
             ("enter", "yours: open in notes · claude's: jump to your matching card"),
+            ("i / a", "edit your card (jumps to it in the notes)"),
             ("gl / gL", "link / unlink your card to one of claude's"),
             ("s", "stage a missing claude card into your notes"),
             ("esc / ctrl-f", "back to notes"),

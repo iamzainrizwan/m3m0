@@ -202,7 +202,8 @@ impl App {
 
     /// Normal-mode editing keys on the notes pane. Returns true if handled.
     pub(super) fn edit_key(&mut self, d: &mut Loaded, prefix: &str, k: K, n: usize, rows: &[(String, usize)]) -> bool {
-        if self.focus != Focus::Notes || self.week.is_none() {
+        // cards view hides the notes: editing there typed into an invisible bullet
+        if self.focus != Focus::Notes || self.week.is_none() || self.cards.is_some() {
             return false;
         }
         let cur = rows.get(self.note_cur).map(|r| r.0.clone());

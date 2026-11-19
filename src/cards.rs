@@ -182,6 +182,14 @@ impl App {
                     c.scroll[0] = true;
                 }
             }
+            (_, K::Ch('i' | 'a' | 'I' | 'A')) if s == 0 => {
+                // edit your card: jump to it in the notes, then insert
+                if let Some((rem, _)) = c.m.mine.get(c.cur[0]).cloned() {
+                    self.cards = None;
+                    self.goto(d, &rem);
+                    self.start_edit(d, &rem, matches!(k, K::Ch('a' | 'A')), false);
+                }
+            }
             (_, K::Ch('s')) if s == 1 => {
                 let i = c.cur[1];
                 if c.m.theirs_free.contains(&i) {
