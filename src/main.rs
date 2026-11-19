@@ -343,6 +343,36 @@ impl App {
         rx
     }
 
+    /// Tree `o`: stage the next "Week N" (a RemNote document) after the module's
+    /// last week, and open it.
+    fn new_week(&mut self, d: &mut Loaded, trows: &[(String, bool)]) {
+        let Some((id, is_mod)) = trows.get(self.tree_cur).cloned() else { return };
+        let m = if is_mod {
+            id
+        } else {
+            match trows[..self.tree_cur].iter().rposition(|r| r.1) {
+                Some(p) => trows[p].0.clone(),
+                None => return,
+            }
+        };
+        let kids = d.kb.children(Some(&m)).to_vec();
+        let num = |k: &String| -> Option<u32> {
+            let rest = d.kb.name(k).strip_prefix("Week")?.trim_start().to_owned();
+            rest.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()
+        };
+        let next = kids.iter().filter_map(num).max().map_or(1, |n| n + 1);
+        let pos = kids.iter().rposition(|k| d.kb.name(k).starts_with("Week")).map_or(kids.len(), |i| i + 1);
+        let name = format!("Week {next}");
+        let wid = self.changes.tmp_id();
+        let line = edit::LineJson { kind: "plain".into(), front: serde_json::json!([name]), back: serde_json::json!([]), doc: true };
+        self.changes.apply(&mut d.kb, edit::Op::Create { id: wid.clone(), parent: m.clone(), pos, line });
+        self.open_mods.insert(m);
+        self.tree_cur = tree_rows(d, &self.open_mods).iter().position(|r| r.0 == wid).unwrap_or(self.tree_cur);
+        self.scroll_tree = true;
+        self.open_week(wid);
+        self.msg = Some(format!("staged {name} · o to start writing · :w to commit"));
+    }
+
     fn open_week(&mut self, w: String) {
         if self.week.as_ref() != Some(&w) {
             self.week = Some(w);
@@ -577,6 +607,7 @@ impl App {
             (_, K::Ctrl('u')) => self.mv(-(HALF_PAGE as isize) * n as isize, trows.len(), nrows.len()),
             (_, K::Ch('j') | K::Down) => self.mv(n as isize, trows.len(), nrows.len()),
             (_, K::Ch('k') | K::Up) => self.mv(-(n as isize), trows.len(), nrows.len()),
+            (_, K::Ch('o')) if self.focus == Focus::Tree => self.new_week(d, &trows),
             (_, K::Ch('<')) if self.focus == Focus::Tree => self.cfg.sidebar_w = (self.cfg.sidebar_w - 20.0 * n as f32).max(SIDEBAR_MIN),
             (_, K::Ch('>')) if self.focus == Focus::Tree => self.cfg.sidebar_w = (self.cfg.sidebar_w + 20.0 * n as f32).min(SIDEBAR_MAX),
             (_, K::Ch('l') | K::Right | K::Enter) => match self.focus {
@@ -2402,7 +2433,7 @@ impl App {
                 skipped += 1;
                 continue;
             }
-            let after = edit::LineJson { kind: before.kind.clone(), front: e.get("front").cloned().unwrap_or_else(|| before.front.clone()), back: e.get("back").cloned().unwrap_or_else(|| before.back.clone()) };
+            let after = edit::LineJson { kind: before.kind.clone(), front: e.get("front").cloned().unwrap_or_else(|| before.front.clone()), back: e.get("back").cloned().unwrap_or_else(|| before.back.clone()), doc: before.doc };
             if after != before {
                 self.changes.apply(&mut d.kb, edit::Op::Update { id: id.to_owned(), before, after });
                 n += 1;
@@ -2429,7 +2460,7 @@ fn apply_file(path: &str) -> i32 {
     for e in list {
         let Some(id) = e["id"].as_str().filter(|i| kb.q.contains_key(*i)) else { continue };
         let before = edit::LineJson::of(&kb.line_of(id));
-        let after = edit::LineJson { kind: before.kind.clone(), front: e.get("front").cloned().unwrap_or_else(|| before.front.clone()), back: e.get("back").cloned().unwrap_or_else(|| before.back.clone()) };
+        let after = edit::LineJson { kind: before.kind.clone(), front: e.get("front").cloned().unwrap_or_else(|| before.front.clone()), back: e.get("back").cloned().unwrap_or_else(|| before.back.clone()), doc: before.doc };
         if after != before {
             ops.push(edit::Op::Update { id: id.to_owned(), before, after });
         }
@@ -2570,7 +2601,7 @@ fn commit_test(keep: bool) -> i32 {
         Op::Create { id: "tmp-7".into(), parent: root.clone(), pos: 4, line: lj("## a heading") },
         Op::Delete { id: "tmp-2".into(), parent: root.clone(), pos: 2, docs: vec![] },
         // [[A|ay]]: creates an alias of A and refers through it (twice: reused)
-        Op::Create { id: "tmp-8".into(), parent: root.clone(), pos: 5, line: LineJson { kind: "plain".into(), front: json!(["E sees ", {"i":"q","_id":"tmp-1","aliasText":"ay"}, " and ", {"i":"q","_id":"tmp-1","aliasText":"ay"}]), back: json!([]) } },
+        Op::Create { id: "tmp-8".into(), parent: root.clone(), pos: 5, line: LineJson { kind: "plain".into(), front: json!(["E sees ", {"i":"q","_id":"tmp-1","aliasText":"ay"}, " and ", {"i":"q","_id":"tmp-1","aliasText":"ay"}]), back: json!([]), doc: false } },
     ];
     let mut children = std::collections::HashMap::new();
     children.insert("tmp-4".to_string(), vec!["tmp-5".to_string(), "tmp-6".to_string()]);

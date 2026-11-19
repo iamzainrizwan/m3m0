@@ -35,7 +35,7 @@ set-fields (all optional): `parent` (+`position`) → `setParent`; `text` →
 `setText`; `back` (null clears) → `setBackText`; `remType` (1 concept, 2
 descriptor) → `setType`; `heading` ("H1".."H3") → `setFontSize`; `practice`
 ("forward"/"backward"/"both"/"none") → `setPracticeDirection`; `cardItem` →
-`setIsCardItem`.
+`setIsCardItem`; `document` → `setIsDocument` (new weeks, tree `o`).
 
 Scores (`QueueInteractionScore`): AGAIN 0, HARD 0.5, GOOD 1, EASY 1.5,
 TOO_EARLY 0.01, RESET 3.

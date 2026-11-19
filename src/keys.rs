@@ -36,6 +36,7 @@ pub const HELP: &[Group] = &[
             ("ctrl-d / ctrl-u", "half page down / up"),
             ("l / enter", "open module or week (week moves focus to notes)"),
             ("h", "collapse module / go to its module"),
+            ("o", "new week: stages the next Week N in this module (:w to commit)"),
             ("< / >", "narrow / widen sidebar (5> works)"),
         ],
     },

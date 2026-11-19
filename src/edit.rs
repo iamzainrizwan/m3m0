@@ -23,11 +23,14 @@ pub struct LineJson {
     pub kind: String,
     pub front: Value,
     pub back: Value,
+    /// make the rem a RemNote document (a page), e.g. a new week
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub doc: bool,
 }
 
 impl LineJson {
     pub fn of(l: &Line) -> LineJson {
-        LineJson { kind: kind_name(l.kind), front: to_rt(&l.front), back: to_rt(&l.back) }
+        LineJson { kind: kind_name(l.kind), front: to_rt(&l.front), back: to_rt(&l.back), doc: false }
     }
     pub fn line(&self) -> Line {
         Line {
@@ -111,7 +114,7 @@ pub fn inverse(op: &Op) -> Op {
             parent: parent.clone(),
             pos: *pos,
             // restore from the saved docs (handled in apply via the Restore path)
-            line: LineJson { kind: "__restore__".into(), front: json!(docs), back: Value::Null },
+            line: LineJson { kind: "__restore__".into(), front: json!(docs), back: Value::Null, doc: false },
         },
         Op::Move { id, from, to } => Op::Move { id: id.clone(), from: to.clone(), to: from.clone() },
     }

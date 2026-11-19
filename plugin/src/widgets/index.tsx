@@ -82,6 +82,7 @@ async function set(plugin: ReactRNPlugin, id: string, m: Msg) {
   if (m.heading !== undefined) await r.setFontSize(m.heading ?? undefined);
   if (m.practice !== undefined) await r.setPracticeDirection(m.practice);
   if (m.cardItem !== undefined) await r.setIsCardItem(m.cardItem);
+  if (m.document !== undefined) await r.setIsDocument(m.document);
 }
 
 function connect(plugin: ReactRNPlugin) {

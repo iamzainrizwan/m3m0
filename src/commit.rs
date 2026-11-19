@@ -73,6 +73,9 @@ fn fields(l: &LineJson, m: &HashMap<String, String>) -> Value {
         // code blocks: only the text changes
         f = json!({ "text": map_ids(&l.front, m) });
     }
+    if l.doc {
+        f["document"] = json!(true);
+    }
     f
 }
 
@@ -269,5 +272,5 @@ fn line_of_doc(d: &Value) -> LineJson {
             _ => "plain".into(),
         }
     };
-    LineJson { kind, front: d.get("key").cloned().unwrap_or(json!([])), back: d.get("value").cloned().unwrap_or(json!([])) }
+    LineJson { kind, front: d.get("key").cloned().unwrap_or(json!([])), back: d.get("value").cloned().unwrap_or(json!([])), doc: false }
 }
