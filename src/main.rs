@@ -1,4 +1,5 @@
 mod boot;
+mod bridge;
 mod config;
 mod icon;
 mod kb;
@@ -14,6 +15,14 @@ use std::sync::mpsc;
 use theme::*;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("bridge-test") {
+        if let Err(e) = bridge::test(&args[2..]) {
+            eprintln!("bridge-test: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--install") {
         if let Err(e) = icon::install() {
             eprintln!("install failed: {e}");

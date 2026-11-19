@@ -1,0 +1,13 @@
+{
+  "manifestVersion": 1,
+  "id": "m3m0_bridge",
+  "name": "m3m0 bridge",
+  "author": "iamzainrizwan",
+  "repoUrl": "https://github.com/iamzainrizwan/m3m0",
+  "version": { "major": 0, "minor": 1, "patch": 0 },
+  "theme": [],
+  "enableOnMobile": false,
+  "description": "Applies changesets sent by the m3m0 desktop client over a localhost websocket.",
+  "requestNative": false,
+  "requiredScopes": [{ "type": "All", "level": "ReadCreateModifyDelete" }]
+}

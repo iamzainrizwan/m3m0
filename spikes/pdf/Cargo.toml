@@ -1,0 +1,9 @@
+[package]
+name = "pdf-spike"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+hayro = "0.9.0"
