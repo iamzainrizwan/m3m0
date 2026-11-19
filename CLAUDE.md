@@ -12,7 +12,8 @@ the sync engine (its cloud sync only exists inside its app); m3m0 is the UI.
 Six features, all in scope (`docs/plan.md` has phases and status):
 1. outliner editor (view + edit notes), vim-style, keyboard-first
 2. graph view of notes (like the Obsidian graph he used via remnote_vault.py)
-3. weekly PDFs for a module (built-in viewer, side by side with notes)
+3. a week files pane: every file for the open week (README with followable
+   links, quiz JSON with answers on `a`, markdown, PDFs, images, text)
 4. Claude flashcards (`uni-git/<module>/revision/week-NN-flashcards.md`) next
    to his own cards, gaps highlighted, keybind to link a rem to a Claude card
 5. Claude chat panel (`claude -p`, whole-module context; may edit only
@@ -38,7 +39,10 @@ Every decision and the reason for it: `docs/design.md`.
 - `src/editor.rs`: insert mode, structure ops, `[[` autocomplete
 - `src/commit.rs`: ops -> bridge calls, tmp id mapping, commit log
 - `src/bridge.rs`: plugin HTTP server + websocket worker, RemNote launch/stop
-- `src/pdf.rs`: week PDFs from uni-git, hayro render worker
+- `src/pdf.rs`: week files pane: file discovery (`week_files`), hayro PDF
+  worker, link following (`f` hints, `b` back), non-PDF scrolling
+- `src/files.rs`: renderers: quiz JSON (+ answers), markdown (+ links),
+  JSON, images, text; `latex_text` converts LaTeX text mode (quiz strings)
 - `src/graph.rs`: graph view (pages/terms/citations, m3m0 look)
 - `src/deck.rs` + `src/cards.rs`: Claude decks, pairing, links, cards view
 - `src/chat.rs`: `claude -p` chat panel
@@ -56,7 +60,8 @@ cd plugin && npm install && npm run build      # plugin/dist + PluginZip.zip
 ```
 
 Dev env vars: `M3M0_DB` (db path), `M3M0_OPEN="FC2/Week 8"` (open a week),
-`M3M0_KEYS` (replay keys after boot; `~b` = ctrl-b, newline = enter),
+`M3M0_KEYS` (replay keys after boot; `~b` = ctrl-b, newline = enter,
+`\x1b` = esc, `|` = pause ~0.6 s so the UI can draw before the next keys),
 `M3M0_SHOTS=DIR` (save frames at fixed times, then quit; real keys ignored),
 `M3M0_DEBUG` (log keys), `M3M0_PLUGIN_DIST`.
 
@@ -89,5 +94,8 @@ writes on a scratch tree (`m3m0 commit-test --keep`, then
   attribution anywhere (no Co-Authored-By, no "generated with").
 - Uni content rule: no Scala material until his PEP C++ coursework is in (don't
   open `pep/**/scala*` even as test data).
+- Every key lives in `src/keys.rs` (the `?` help is tabbed by section,
+  opened on the current pane's section; which-key covers prefixes). Add any
+  new key there, or it's undiscoverable.
 - Ask before adding features he didn't list. Lowercase casual voice for any
   user-facing copy.

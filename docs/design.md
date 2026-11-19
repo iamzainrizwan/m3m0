@@ -85,10 +85,17 @@ directional select, tab walks links, / search, L local, f module filter.
 - May answer questions and edit Claude's own material (`<module>/revision/`),
   never his rems.
 
-## pdfs
+## week files pane
 
-KEATS downloads land in `uni-git/<module>/sources/` and get sorted into
-`weeks/`. Built-in viewer (hayro, `docs/spikes.md`), side by side with notes.
+Not just PDFs: every file for the open week ("this shouldn't just let me see
+pdfs, it should let me browse ANY file for that week"). A week file is
+anything under a `week-NN` folder or named `week-NN*`, plus that week's
+lgt/sgt sheets; module-wide PDFs are listed after. The pane opens on the
+week's README, whose links are followable (click, or `f` + hint letter;
+`b` goes back), so the list (`o`) is rarely needed. Renderers: hayro for
+PDFs, quiz JSON (answers + explanations from `data/answers/*/` on `a`),
+markdown, JSON, images, text. Quiz strings are LaTeX text mode outside
+`$...$` and go through `files::latex_text`.
 
 ## mapping rems to uni-git
 
