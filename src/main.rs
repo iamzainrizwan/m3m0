@@ -14,6 +14,7 @@ mod keys;
 mod math;
 mod pdf;
 mod render;
+mod review;
 mod rich;
 mod theme;
 
@@ -124,6 +125,7 @@ enum Deferred {
     Commit,
     Search(isize),
     Goto(String),
+    Review(Option<String>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -177,6 +179,7 @@ struct App {
     graph_anchor: Option<usize>,
     deferred: Vec<Deferred>,
     chat: chat::Chat,
+    review: Option<review::Review>,
     last_search: Option<String>,
     links: std::collections::HashMap<String, String>,
 }
@@ -303,6 +306,7 @@ impl App {
             graph_anchor: None,
             deferred: vec![],
             chat: chat::Chat::default(),
+            review: None,
             last_search: None,
             links: deck::load_links(),
         }
@@ -442,6 +446,18 @@ impl App {
                 self.open_cards(d);
                 self.focus = Focus::Notes;
             }
+            return;
+        }
+        if self.review.is_some() && self.focus == Focus::Notes && !matches!(k, K::Ch(':') | K::Ch('?') | K::Tab | K::Ctrl(_)) && self.review_key(k) {
+            return;
+        }
+        // gr review this page · gR this module
+        if prefix == "g" && matches!(k, K::Ch('r') | K::Ch('R')) && self.cards.is_none() {
+            let scope = match k {
+                K::Ch('r') => self.week.clone(),
+                _ => self.week.as_ref().and_then(|w| d.kb.module_of(w)),
+            };
+            self.start_review(d, scope);
             return;
         }
         if self.cards.is_some() && self.focus == Focus::Notes && self.cards_key(d, &prefix, k, n) {
@@ -1105,6 +1121,12 @@ impl App {
             (Some("w!"), _) => self.deferred.push(Deferred::Commit),
             (Some("log"), _) => self.overlay = Overlay::Log { entries: commit::read_log(), cur: 0 },
             (Some("help" | "h"), _) => self.overlay = Overlay::Help { scroll: 0 },
+            (Some("review"), arg) => {
+                if let Some(Ok(d)) = &self.data {
+                    let _ = d;
+                }
+                self.deferred.push(Deferred::Review(arg.map(str::to_owned)));
+            }
             (Some("find" | "f"), _) => self.overlay = Overlay::Find { q: String::new(), items: vec![], cur: 0, for_q: None },
             (Some(""), _) | (None, _) => {}
             (Some(c), _) => self.msg = Some(format!("not a command: {c}")),
@@ -1170,6 +1192,17 @@ impl eframe::App for App {
                 Deferred::Revert(ops) => self.stage_revert(&ops),
                 Deferred::Commit => self.start_commit(),
                 Deferred::Search(dir) => self.search_notes(dir),
+                Deferred::Review(arg) => {
+                    if let Some(Ok(d)) = self.data.take() {
+                        let scope = match arg.as_deref() {
+                            Some("all") => None,
+                            Some("module") => self.week.as_ref().and_then(|w| d.kb.module_of(w)),
+                            _ => self.week.clone(),
+                        };
+                        self.start_review(&d, scope);
+                        self.data = Some(Ok(d));
+                    }
+                }
                 Deferred::Goto(id) => {
                     if let Some(Ok(d)) = self.data.take() {
                         self.view_graph = false;
@@ -1629,6 +1662,10 @@ impl App {
 
     fn notes(&mut self, ctx: &egui::Context, d: &Loaded) {
         let focused = self.focus == Focus::Notes;
+        if self.review.is_some() {
+            self.review_ui(ctx, d);
+            return;
+        }
         if self.cards.is_some() {
             self.cards_ui(ctx, d);
             return;
@@ -1780,6 +1817,8 @@ impl App {
             "pdf"
         } else if self.focus == Focus::Chat {
             "chat"
+        } else if self.review.is_some() {
+            "review"
         } else if self.cards.is_some() {
             "cards"
         } else if self.view_graph {

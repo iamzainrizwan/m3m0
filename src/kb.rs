@@ -61,6 +61,8 @@ pub struct Kb {
     pub dirs: HashMap<String, Vec<String>>,
     pub cards: usize,
     pub db_bytes: u64,
+    /// raw card docs (scheduling: n = next due, ml = memory level, h = history)
+    pub card_docs: Vec<Value>,
 }
 
 /// Consistent in-memory copy of the live DB (WAL included), never writing to it.
@@ -98,6 +100,7 @@ impl Kb {
         }
         let mut dirs: HashMap<String, Vec<String>> = HashMap::new();
         let mut cards = 0;
+        let mut card_docs = vec![];
         let mut st = conn.prepare("select doc from cards").map_err(|e| e.to_string())?;
         for d in st.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?.flatten() {
             cards += 1;
@@ -105,11 +108,12 @@ impl Kb {
                 let r = d.get("rId").and_then(Value::as_str).unwrap_or("").to_owned();
                 let k = d.get("k").and_then(Value::as_str).unwrap_or("");
                 dirs.entry(r).or_default().push(k.rsplit('.').next().unwrap_or("").to_owned());
+                card_docs.push(d);
             }
         }
         drop(st);
         let db_bytes = std::fs::metadata(db).map(|m| m.len()).unwrap_or(0);
-        Ok(Kb { q, kids, dirs, cards, db_bytes })
+        Ok(Kb { q, kids, dirs, cards, db_bytes, card_docs })
     }
 
     pub fn children(&self, i: Option<&str>) -> &[String] {

@@ -146,6 +146,17 @@ pub const HELP: &[Group] = &[
         ],
     },
     Group {
+        title: "review (RemNote's scheduler, synced)",
+        keys: &[
+            ("gr / gR", "review due cards on this page / in this module"),
+            (":review all", "everything due"),
+            ("space / enter", "reveal the answer"),
+            ("1 2 3 4", "again / hard / good / easy (sent to RemNote)"),
+            ("s", "skip this card"),
+            ("esc", "stop (shows how many were graded)"),
+        ],
+    },
+    Group {
         title: "chat (ctrl-a)",
         keys: &[
             ("enter", "send (claude sees this page + the module's files)"),
@@ -184,7 +195,7 @@ pub fn which(prefix: &str, ctx: &str) -> Vec<(&'static str, &'static str)> {
     match (prefix, ctx) {
         ("g", "cards") => vec![("g", "top"), ("l", "link your card"), ("L", "unlink")],
         ("g", "pdf") => vec![("g", "top of file")],
-        ("g", _) => vec![("g", "top"), ("d", "go to [[ref]] on this bullet"), ("l", "link to a claude card")],
+        ("g", _) => vec![("g", "top"), ("d", "go to [[ref]] on this bullet"), ("l", "link to a claude card"), ("r", "review this page's due cards"), ("R", "review this module")],
         ("z", _) => vec![("a", "toggle fold"), ("c", "close fold"), ("o", "open fold"), ("M", "fold all"), ("R", "unfold all")],
         ("d", _) => vec![("d", "delete bullet (and children)")],
         (">", _) => vec![(">", "indent")],
@@ -205,6 +216,7 @@ pub fn hint(ctx: &str) -> &'static str {
         "pdf" => "j/k scroll · J/K page · ]/[ file · +/- zoom · h notes",
         "graph" => "hjkl move · tab links · / find · enter open · L local · f module",
         "cards" => "h/l column · ]/[ gaps · enter open · gl link · s stage",
+        "review" => "space reveal · 1 again 2 hard 3 good 4 easy · s skip · esc stop",
         "chat" => "enter send · shift-enter newline · ctrl-n new chat · esc notes",
         _ => "",
     }
