@@ -159,6 +159,8 @@ struct App {
     graph: Option<graph::Graph>,
     view_graph: bool,
     cards: Option<cards::CardsView>,
+    graph_anchor: Option<usize>,
+    last_search: Option<String>,
     links: std::collections::HashMap<String, String>,
 }
 
@@ -281,6 +283,8 @@ impl App {
             graph: None,
             view_graph: false,
             cards: None,
+            graph_anchor: None,
+            last_search: None,
             links: deck::load_links(),
         }
     }
@@ -339,6 +343,7 @@ impl App {
                         out.push(match key {
                             egui::Key::Enter => K::Enter,
                             egui::Key::Escape => K::Esc,
+                            egui::Key::Tab if modifiers.shift => K::ShiftTab,
                             egui::Key::Tab => K::Tab,
                             egui::Key::Backspace => K::Back,
                             egui::Key::ArrowUp => K::Up,
@@ -469,6 +474,9 @@ impl App {
             (_, K::Ch('g')) => self.pending = format!("{digits}g"),
             (_, K::Ch('z')) => self.pending.push('z'),
             (_, K::Ch(':')) => self.overlay = Overlay::Cmd(String::new()),
+            (_, K::Ch('/')) => self.overlay = Overlay::Cmd("/".into()),
+            (_, K::Ch('n')) if self.focus == Focus::Notes => self.search_notes(n as isize),
+            (_, K::Ch('N')) if self.focus == Focus::Notes => self.search_notes(-(n as isize)),
             (_, K::Ch('?')) => self.overlay = Overlay::Help,
             (_, K::Ch('G')) => self.jump(usize::MAX, trows.len(), nrows.len()),
             (_, K::Tab) => self.toggle_focus(),
@@ -565,6 +573,46 @@ impl App {
         };
     }
 
+    /// Jump to the next (dir 1) / previous (-1) bullet on the page containing the last search.
+    fn search_notes(&mut self, dir: isize) {
+        let (Some(q), Some(Ok(d)), Some(w)) = (self.last_search.clone(), &self.data, self.week.clone()) else { return };
+        let ql = q.to_lowercase();
+        // search folded rems too: unfold everything on the page first
+        let all = note_rows(&d.kb, &w, &HashSet::new());
+        let n = all.len() as isize;
+        if n == 0 {
+            return;
+        }
+        let rows = note_rows(&d.kb, &w, &self.folded);
+        let cur_id = rows.get(self.note_cur).map(|r| r.0.clone());
+        let start = cur_id.and_then(|c| all.iter().position(|r| r.0 == c)).unwrap_or(0) as isize;
+        let name = |id: &str| d.kb.name(id);
+        for k in 1..=n {
+            let i = (start + dir * k).rem_euclid(n) as usize;
+            let l = d.kb.line_of(&all[i].0);
+            let text = format!("{} {}", rich::plain(&l.front, &name), rich::plain(&l.back, &name)).to_lowercase();
+            if text.contains(&ql) {
+                let id = all[i].0.clone();
+                // unfold its ancestors
+                let mut cur = id.clone();
+                while let Some(p) = d.kb.q.get(&cur).and_then(|x| x.get("parent")).and_then(|p| p.as_str()).map(str::to_owned) {
+                    if p == w {
+                        break;
+                    }
+                    self.folded.remove(&p);
+                    cur = p;
+                }
+                let rows = note_rows(&d.kb, &w, &self.folded);
+                self.note_cur = rows.iter().position(|r| r.0 == id).unwrap_or(0);
+                self.scroll_notes = true;
+                self.focus = Focus::Notes;
+                self.msg = Some(format!("/{q}"));
+                return;
+            }
+        }
+        self.msg = Some(format!("not found on this page: {q}"));
+    }
+
     fn toggle_graph(&mut self, d: &Loaded, rows: &[(String, usize)]) {
         self.view_graph = !self.view_graph;
         if !self.view_graph {
@@ -587,6 +635,9 @@ impl App {
     }
 
     fn graph_key(&mut self, d: &Loaded, k: K, n: usize) -> bool {
+        if !matches!(k, K::Tab | K::ShiftTab) {
+            self.graph_anchor = None;
+        }
         let Some(g) = self.graph.as_mut() else { return false };
         let _ = n;
         match k {
@@ -598,7 +649,10 @@ impl App {
                 let on = g.local.is_none();
                 g.set_local(on);
             }
-            K::Ch('f') => g.cycle_filter(&d.mods),
+            K::Ch('f') => g.cycle_filter(),
+            K::Tab => g.walk_neighbours(1, &mut self.graph_anchor),
+            K::ShiftTab => g.walk_neighbours(-1, &mut self.graph_anchor),
+            K::Ch('/') => self.overlay = Overlay::Cmd("/".into()),
             K::Ch('+') => {
                 g.scale = (g.scale * 1.25).min(6.0);
                 g.fit = false;
@@ -621,7 +675,7 @@ impl App {
                 self.graph = Some(graph::Graph::build(&d.kb, &d.mods));
             }
             K::Enter => {
-                if let Some(id) = g.sel.map(|s| g.nodes[s].id.clone()).filter(|i| !i.starts_with("hub:")) {
+                if let Some(id) = g.sel.map(|s| g.nodes[s].id.clone()) {
                     self.view_graph = false;
                     self.goto(d, &id);
                 }
@@ -944,6 +998,22 @@ impl App {
     }
 
     fn run(&mut self, ctx: &egui::Context, cmd: &str) {
+        if let Some(q) = cmd.strip_prefix('/') {
+            if q.is_empty() {
+                return;
+            }
+            self.last_search = Some(q.to_owned());
+            if self.view_graph {
+                if let Some(g) = self.graph.as_mut() {
+                    if !g.search(q) {
+                        self.msg = Some(format!("no node matches {q}"));
+                    }
+                }
+            } else {
+                self.search_notes(1);
+            }
+            return;
+        }
         let mut it = cmd.split_whitespace();
         match (it.next(), it.next()) {
             (Some("q" | "quit" | "q!" | "wq"), _) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
@@ -1138,7 +1208,8 @@ impl App {
             let p = ui.painter();
             let f = FontId::monospace(12.5);
             if let Overlay::Cmd(s) = &self.overlay {
-                let t = p.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, format!(":{s}"), f.clone(), FG_BRIGHT);
+                let shown = if s.starts_with('/') { s.clone() } else { format!(":{s}") };
+                let t = p.text(Pos2::new(r.left() + 8.0, r.center().y), Align2::LEFT_CENTER, shown, f.clone(), FG_BRIGHT);
                 p.rect_filled(Rect::from_min_size(Pos2::new(t.right() + 1.0, r.top() + 4.0), Vec2::new(8.0, r.height() - 8.0)), 0.0, RED_CURSOR);
                 return;
             }
