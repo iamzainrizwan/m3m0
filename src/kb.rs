@@ -220,7 +220,7 @@ impl Kb {
         let d = &self.q[i];
         let front = parse_rt(d.get("key"));
         let back = parse_rt(d.get("value"));
-        let has_value = d.get("value").is_some_and(|v| !v.is_null());
+        let has_value = d.get("value").is_some_and(|v| !v.is_null() && v.as_array().is_none_or(|a| !a.is_empty()));
         let staged = d.get("m3m0").and_then(Value::as_str).map(crate::edit::kind_from);
         let kind = if let Some(k) = staged {
             k

@@ -50,12 +50,16 @@ fn fields(l: &LineJson, m: &HashMap<String, String>) -> Value {
     let kind = crate::edit::kind_from(&l.kind);
     let mut f = json!({ "text": map_ids(&l.front, m) });
     let is_card = matches!(kind, Kind::Concept | Kind::Descriptor | Kind::Basic | Kind::Both);
-    f["back"] = if is_card || l.back.as_array().is_some_and(|a| !a.is_empty()) { map_ids(&l.back, m) } else { Value::Null };
-    f["remType"] = json!(match kind {
-        Kind::Concept => 1,
-        Kind::Descriptor => 2,
-        _ => 0,
-    });
+    // the SDK's setBackText needs an argument: omit "back" when there's none
+    // (clearing a former card's back is done by the caller with [])
+    if is_card || l.back.as_array().is_some_and(|a| !a.is_empty()) {
+        f["back"] = map_ids(&l.back, m);
+    }
+    f["remType"] = match kind {
+        Kind::Concept => json!(1),
+        Kind::Descriptor => json!(2),
+        _ => json!("DEFAULT_TYPE"), // the SDK's SetRemType.DEFAULT_TYPE is a string enum value
+    };
     f["heading"] = match kind {
         Kind::Heading(n) => json!(format!("H{}", n.clamp(1, 3))),
         _ => Value::Null,
@@ -114,6 +118,10 @@ pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>)
                 }
                 Op::Update { id, before, after } => {
                     let mut f = fields(after, &idmap);
+                    let had_back = before.back.as_array().is_some_and(|a| !a.is_empty());
+                    if had_back && f.get("back").is_none() {
+                        f["back"] = json!([]);
+                    }
                     f["rem"] = json!(real(&idmap, id));
                     bridge.call("update", f)?;
                     if after.kind == "multiline" && before.kind != "multiline" {

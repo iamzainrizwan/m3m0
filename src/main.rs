@@ -22,6 +22,9 @@ use theme::*;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("commit-test") {
+        std::process::exit(commit_test(args.iter().any(|a| a == "--keep")));
+    }
     if args.get(1).map(String::as_str) == Some("roundtrip") {
         std::process::exit(roundtrip());
     }
@@ -1435,4 +1438,63 @@ fn rename_ids(kb: &mut Kb, m: &std::collections::HashMap<String, String>) {
         .into_iter()
         .map(|(p, v)| (p.map(|p| m.get(&p).cloned().unwrap_or(p)), v.into_iter().map(|c| m.get(&c).cloned().unwrap_or(c)).collect()))
         .collect();
+}
+
+/// `m3m0 commit-test`: run staged-style ops through commit::run against RemNote
+/// on a dated scratch tree, read them back, then delete the tree (unless --keep).
+fn commit_test(keep: bool) -> i32 {
+    use edit::{LineJson, Op};
+    use serde_json::json;
+    let b = bridge::Bridge::start(|| {});
+    println!("waiting for the RemNote plugin (up to 90 s)…");
+    if !b.wait_online(90) {
+        eprintln!("plugin didn't connect");
+        return 1;
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let root = match b.call("create", json!({"parent": null, "text": [format!("m3m0 commit test {stamp}")]})) {
+        Ok(r) => r["id"].as_str().unwrap_or_default().to_owned(),
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    let side = rich::Side::default();
+    let lj = |t: &str| LineJson::of(&rich::text_to_line(t, &|_| None, &side, &mut || "1795".into()));
+    let ops = vec![
+        Op::Create { id: "tmp-1".into(), parent: root.clone(), pos: 0, line: lj("plain A") },
+        Op::Create { id: "tmp-2".into(), parent: root.clone(), pos: 1, line: lj("B :: def with $x^2$ and `code`") },
+        Op::Update { id: "tmp-1".into(), before: lj("plain A"), after: lj("A >> back of A") },
+        Op::Create { id: "tmp-3".into(), parent: "tmp-1".into(), pos: 0, line: lj("C child of A") },
+        Op::Move { id: "tmp-3".into(), from: ("tmp-1".into(), 0), to: (root.clone(), 0) },
+        Op::Create { id: "tmp-4".into(), parent: root.clone(), pos: 3, line: lj("D list") },
+        Op::Create { id: "tmp-5".into(), parent: "tmp-4".into(), pos: 0, line: lj("item one") },
+        Op::Create { id: "tmp-6".into(), parent: "tmp-4".into(), pos: 1, line: lj("item two") },
+        Op::Update { id: "tmp-4".into(), before: lj("D list"), after: lj("D list >>>") },
+        Op::Create { id: "tmp-7".into(), parent: root.clone(), pos: 4, line: lj("## a heading") },
+        Op::Delete { id: "tmp-2".into(), parent: root.clone(), pos: 2, docs: vec![] },
+    ];
+    let mut children = std::collections::HashMap::new();
+    children.insert("tmp-4".to_string(), vec!["tmp-5".to_string(), "tmp-6".to_string()]);
+    let out = commit::run(&b, &ops, &children);
+    println!("done {}/{}  err {:?}", out.done, ops.len(), out.err);
+    for t in ["tmp-1", "tmp-3", "tmp-4", "tmp-5", "tmp-7"] {
+        if let Some(id) = out.idmap.get(t) {
+            match b.call("get", json!({"rem": id})) {
+                Ok(g) => println!("  {t} {id}: type={} parent={} text={} back={} cards={}", g["type"], g["parent"], g["text"], g["back"], g["cards"].as_array().map_or(0, |c| c.len())),
+                Err(e) => println!("  {t}: {e}"),
+            }
+        }
+    }
+    if let Some(id) = out.idmap.get("tmp-2") {
+        println!("  tmp-2 (deleted) get -> {:?}", b.call("get", json!({"rem": id})).err());
+    }
+    // order under root
+    if keep {
+        println!("kept scratch tree {root}");
+    } else {
+        let _ = b.call("delete", json!({"rem": root}));
+        println!("deleted scratch tree");
+    }
+    (out.err.is_some()) as i32
 }
