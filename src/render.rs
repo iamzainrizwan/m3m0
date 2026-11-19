@@ -4,12 +4,15 @@ use crate::kb::Kb;
 use crate::math::Math;
 use crate::rich::{Kind, Line, Span};
 use crate::theme::*;
-use eframe::egui::{self, Color32, FontFamily, Rect, RichText, Sense, Vec2};
+use crate::math::KATEX_SCALE;
+use eframe::egui::{self, Align, Color32, FontFamily, Layout, Rect, RichText, Sense, Vec2, WidgetText};
 
 pub struct Style {
     pub size: f32,
     pub color: Color32,
     pub bold: bool,
+    /// bullet glyph drawn on the first line's baseline
+    pub bullet: Option<(&'static str, Color32)>,
 }
 
 /// Draw `line` into a wrapping row. Returns the rects of [[refs]] (for clicks).
@@ -19,9 +22,16 @@ pub fn line(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, l: &Line, st: &Style) -
         code_block(ui, kb, l, st, &mut refs);
         return refs;
     }
-    ui.horizontal_wrapped(|ui| {
+    let m = metrics(ui, math, l, st);
+    // bullet in its own column (on the first line's baseline) so wrapped lines
+    // indent under the text, not under the bullet
+    if let Some((b, c)) = st.bullet {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        word(ui, RichText::new(format!("{b}  ")).size(st.size - 2.0).color(c), &m);
+    }
+    ui.with_layout(Layout::left_to_right(Align::Min).with_main_wrap(true), |ui| {
         ui.spacing_mut().item_spacing = Vec2::ZERO;
-        spans(ui, kb, math, &l.front, st, &mut refs);
+        spans(ui, kb, math, &l.front, st, &m, &mut refs);
         let marker = match l.kind {
             Kind::Concept => Some("::"),
             Kind::Descriptor => Some(";;"),
@@ -31,10 +41,11 @@ pub fn line(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, l: &Line, st: &Style) -
             Kind::Mcq => Some(">>A)"),
             _ => None,
         };
+        let m_ = m;
         if let Some(m) = marker {
-            ui.label(RichText::new(format!(" {m} ")).size(st.size).color(RED));
-            let back = Style { size: st.size, color: FG_DIM.lerp_to_gamma(FG, 0.6), bold: false };
-            spans(ui, kb, math, &l.back, &back, &mut refs);
+            word(ui, RichText::new(format!(" {m} ")).size(st.size).color(RED), &m_);
+            let back = Style { size: st.size, color: FG_DIM.lerp_to_gamma(FG, 0.6), bold: false, bullet: None };
+            spans(ui, kb, math, &l.back, &back, &m_, &mut refs);
         }
     });
     refs
@@ -68,7 +79,40 @@ fn code_block(ui: &mut egui::Ui, kb: &Kb, l: &Line, st: &Style, refs: &mut Vec<(
     });
 }
 
-fn spans(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, sp: &[Span], st: &Style, refs: &mut Vec<(Rect, String)>) {
+/// Vertical metrics shared by every item of one rem so text and formulas share a
+/// baseline: each item is `height` tall with its baseline `baseline` from the top.
+#[derive(Clone, Copy)]
+struct Metrics {
+    baseline: f32,
+    height: f32,
+}
+
+fn metrics(ui: &egui::Ui, math: &mut Math, l: &Line, st: &Style) -> Metrics {
+    let g = WidgetText::from(RichText::new("x").size(st.size)).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::FontSelection::Default);
+    let text_base = g.rows.first().and_then(|r| r.glyphs.first()).map(|g| g.pos.y).unwrap_or(st.size);
+    let text_desc = g.size().y - text_base;
+    let (mut asc, mut desc) = (text_base, text_desc);
+    for s in l.front.iter().chain(&l.back) {
+        if let Span::Latex { tex, .. } = s {
+            if let Some(t) = math.get(ui.ctx(), tex, st.size * KATEX_SCALE, st.color) {
+                asc = asc.max(t.ascent);
+                desc = desc.max(t.size.y - t.ascent);
+            }
+        }
+    }
+    Metrics { baseline: asc, height: asc + desc }
+}
+
+/// A text run placed on the shared baseline.
+fn word(ui: &mut egui::Ui, t: RichText, m: &Metrics) -> egui::Response {
+    let g = WidgetText::from(t).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::FontSelection::Default);
+    let base = g.rows.first().and_then(|r| r.glyphs.first()).map(|g| g.pos.y).unwrap_or(0.0);
+    let (rect, resp) = ui.allocate_exact_size(Vec2::new(g.size().x, m.height), Sense::hover());
+    ui.painter().galley(rect.min + Vec2::new(0.0, m.baseline - base), g, FG);
+    resp
+}
+
+fn spans(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, sp: &[Span], st: &Style, m: &Metrics, refs: &mut Vec<(Rect, String)>) {
     for s in sp {
         match s {
             Span::Text { t, b, i, u, code, cloze, extra } => {
@@ -92,21 +136,22 @@ fn spans(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, sp: &[Span], st: &Style, r
                     if cloze.is_some() {
                         r = r.color(FG_BRIGHT).background_color(CRIMSON);
                     }
-                    ui.add(egui::Label::new(r).selectable(false));
+                    word(ui, r, m);
                 }
             }
             Span::Latex { tex, cloze, .. } => {
                 let col = if cloze.is_some() { FG_BRIGHT } else { st.color };
-                match math.get(ui.ctx(), tex, st.size, col) {
-                    Some((tex_h, size)) => {
-                        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+                match math.get(ui.ctx(), tex, st.size * KATEX_SCALE, col) {
+                    Some(t) => {
+                        let (slot, _) = ui.allocate_exact_size(Vec2::new(t.size.x, m.height), Sense::hover());
+                        let rect = Rect::from_min_size(slot.min + Vec2::new(0.0, m.baseline - t.ascent), t.size);
                         if cloze.is_some() {
                             ui.painter().rect_filled(rect, 0.0, CRIMSON);
                         }
-                        ui.painter().image(tex_h.id(), rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
+                        ui.painter().image(t.tex.id(), rect, Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), Color32::WHITE);
                     }
                     None => {
-                        ui.add(egui::Label::new(RichText::new(format!("${tex}$")).monospace().size(st.size - 1.0).color(RED_BRIGHT)).selectable(false));
+                        word(ui, RichText::new(format!("${tex}$")).monospace().size(st.size - 1.0).color(RED_BRIGHT), m);
                     }
                 }
             }
@@ -117,12 +162,12 @@ fn spans(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, sp: &[Span], st: &Style, r
                 if cloze.is_some() {
                     r = r.background_color(CRIMSON);
                 }
-                let resp = ui.add(egui::Label::new(r).selectable(false));
+                let resp = word(ui, r, m);
                 refs.push((resp.rect, id.clone()));
             }
             Span::Opaque(v) => {
                 let what = if v.get("i").and_then(|x| x.as_str()) == Some("i") { "[image]" } else { "[object]" };
-                ui.add(egui::Label::new(RichText::new(what).size(st.size - 1.0).color(COMMENT)).selectable(false));
+                word(ui, RichText::new(what).size(st.size - 1.0).color(COMMENT), m);
             }
         }
     }

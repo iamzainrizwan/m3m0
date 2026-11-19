@@ -35,15 +35,29 @@ fn main() -> eframe::Result {
         }
         return Ok(());
     }
+    // previews (M3M0_SHOTS): a fixed laptop-sized window at a fixed spot, so
+    // scripts/preview.sh can put it on the secondary monitor via XWayland
+    let preview = std::env::var("M3M0_SHOTS").is_ok();
+    let mut vp = egui::ViewportBuilder::default()
+        .with_title("m3m0")
+        .with_app_id("m3m0")
+        .with_decorations(false) // our own rice titlebar instead of the toolkit's
+        .with_inner_size([1280.0, 820.0])
+        .with_min_inner_size([520.0, 360.0])
+        .with_maximized(!preview)
+        .with_icon(std::sync::Arc::new(egui::IconData { rgba: icon::rgba(256), width: 256, height: 256 }));
+    if preview {
+        let pos = std::env::var("M3M0_PREVIEW_POS").ok().and_then(|p| {
+            let (x, y) = p.split_once(',')?;
+            Some([x.parse().ok()?, y.parse().ok()?])
+        });
+        vp = vp.with_inner_size([1706.0, 1066.0]);
+        if let Some(p) = pos {
+            vp = vp.with_position(p);
+        }
+    }
     let opts = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("m3m0")
-            .with_app_id("m3m0")
-            .with_decorations(false) // our own rice titlebar instead of the toolkit's
-            .with_inner_size([1280.0, 820.0])
-            .with_min_inner_size([520.0, 360.0])
-            .with_maximized(true)
-            .with_icon(std::sync::Arc::new(egui::IconData { rgba: icon::rgba(256), width: 256, height: 256 })),
+        viewport: vp,
         ..Default::default()
     };
     eframe::run_native("m3m0", opts, Box::new(|cc| Ok(Box::new(App::new(cc)))))
@@ -889,7 +903,7 @@ impl App {
                                     let line = d.kb.line_of(id);
                                     match heading {
                                         Some(h) => {
-                                            let st = render::Style { size: HEADINGS[h.min(4) as usize], color: FG_BRIGHT, bold: true };
+                                            let st = render::Style { size: HEADINGS[h.min(4) as usize], color: FG_BRIGHT, bold: true, bullet: None };
                                             refs = render::line(ui, &d.kb, math, &line, &st);
                                             if folded {
                                                 ui.label(RichText::new(" …").color(RED).size(NOTE_TEXT));
@@ -901,9 +915,7 @@ impl App {
                                                 (true, false) => ("•", RED),
                                                 _ => ("•", COMMENT),
                                             };
-                                            ui.add(egui::Label::new(RichText::new(b).color(c).size(NOTE_TEXT - 2.0)).selectable(false));
-                                            ui.add_space(6.0);
-                                            let st = render::Style { size: NOTE_TEXT, color: FG, bold: false };
+                                            let st = render::Style { size: NOTE_TEXT, color: FG, bold: false, bullet: Some((b, c)) };
                                             refs = render::line(ui, &d.kb, math, &line, &st);
                                         }
                                     }
