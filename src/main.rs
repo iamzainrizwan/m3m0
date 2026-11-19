@@ -1,7 +1,9 @@
 mod boot;
+mod cards;
 mod bridge;
 mod commit;
 mod config;
+mod deck;
 mod edit;
 mod editor;
 mod icon;
@@ -106,6 +108,7 @@ enum Overlay {
     /// staged changes; enter commits
     Diff { scroll: usize },
     Log { entries: Vec<commit::Entry>, cur: usize },
+    Link(cards::LinkPick),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -155,6 +158,8 @@ struct App {
     pdfs: pdf::Pdfs,
     graph: Option<graph::Graph>,
     view_graph: bool,
+    cards: Option<cards::CardsView>,
+    links: std::collections::HashMap<String, String>,
 }
 
 fn load(db: Option<PathBuf>) -> Result<Loaded, String> {
@@ -235,7 +240,9 @@ fn note_rows(kb: &Kb, week: &str, folded: &HashSet<String>) -> Vec<(String, usiz
 impl App {
     fn new(cc: &eframe::CreationContext) -> App {
         theme::install(&cc.egui_ctx);
-        let cfg = Config::load();
+        // previews never touch the real config
+        let preview = std::env::var("M3M0_SHOTS").is_ok();
+        let cfg = if preview { Config { zoom: Some(1.15), ..Config::default() } } else { Config::load() };
         if let Some(z) = cfg.zoom {
             cc.egui_ctx.set_zoom_factor(z);
         }
@@ -273,6 +280,8 @@ impl App {
             pdfs,
             graph: None,
             view_graph: false,
+            cards: None,
+            links: deck::load_links(),
         }
     }
 
@@ -399,6 +408,28 @@ impl App {
         let trows = tree_rows(d, &self.open_mods);
         let nrows = self.week.as_ref().map(|w| note_rows(&d.kb, w, &self.folded)).unwrap_or_default();
 
+        if let K::Ctrl('f') = k {
+            if self.cards.is_some() {
+                self.cards = None;
+            } else {
+                self.view_graph = false;
+                self.open_cards(d);
+                self.focus = Focus::Notes;
+            }
+            return;
+        }
+        if self.cards.is_some() && self.focus == Focus::Notes && self.cards_key(d, &prefix, k, n) {
+            return;
+        }
+        // gl on a bullet in the notes: link it to a Claude card
+        if prefix == "g" && matches!(k, K::Ch('l')) && self.focus == Focus::Notes && self.cards.is_none() {
+            if let Some((id, _)) = nrows.get(self.note_cur).cloned() {
+                self.open_cards(d);
+                self.link_picker(d, &id);
+                self.cards = None;
+            }
+            return;
+        }
         if let K::Ctrl('g') = k {
             self.toggle_graph(d, &nrows);
             return;
@@ -784,6 +815,27 @@ impl App {
                 K::Esc | K::Ch('q') => self.overlay = Overlay::None,
                 _ => {}
             },
+            Overlay::Link(lp) => match k {
+                K::Ch('j') | K::Down | K::Ctrl('n') => lp.cur = (lp.cur + 1).min(lp.items.len().saturating_sub(1)),
+                K::Ch('k') | K::Up | K::Ctrl('p') => lp.cur = lp.cur.saturating_sub(1),
+                K::Enter => {
+                    let (rem, card) = (lp.rem.clone(), lp.items.get(lp.cur).map(|x| x.0));
+                    self.overlay = Overlay::None;
+                    if let (Some(card), Some(Ok(d))) = (card, self.data.take()) {
+                        let reopen = self.cards.is_some();
+                        if !reopen {
+                            self.open_cards(&d);
+                        }
+                        self.do_link(&d, &rem, card);
+                        if !reopen {
+                            self.cards = None;
+                        }
+                        self.data = Some(Ok(d));
+                    }
+                }
+                K::Esc | K::Ch('q') => self.overlay = Overlay::None,
+                _ => {}
+            },
             Overlay::None => {}
         }
     }
@@ -1024,7 +1076,7 @@ impl eframe::App for App {
         self.overlays(ctx);
 
         self.cfg.zoom = Some(ctx.zoom_factor());
-        if self.cfg != self.saved && !ctx.input(|i| i.pointer.any_down()) {
+        if self.cfg != self.saved && !ctx.input(|i| i.pointer.any_down()) && std::env::var("M3M0_SHOTS").is_err() {
             self.cfg.save();
             self.saved = self.cfg.clone();
         }
@@ -1240,6 +1292,10 @@ impl App {
 
     fn notes(&mut self, ctx: &egui::Context, d: &Loaded) {
         let focused = self.focus == Focus::Notes;
+        if self.cards.is_some() {
+            self.cards_ui(ctx, d);
+            return;
+        }
         if self.view_graph {
             let mut open = None;
             egui::CentralPanel::default().frame(egui::Frame::new().fill(BG)).show(ctx, |ui| {
