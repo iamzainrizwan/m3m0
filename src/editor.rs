@@ -211,7 +211,8 @@ impl App {
                 let end = matches!(k, K::Ch('a' | 'A'));
                 self.start_edit(d, cur.as_deref().unwrap(), end, false);
             }
-            ("", K::Ch('o')) | ("", K::Ch('O')) => {
+            // o / O; and i / a on an empty page start its first bullet
+            ("", K::Ch('o' | 'O' | 'i' | 'I' | 'a' | 'A')) => {
                 if let Some(id) = self.new_rem(d, cur.as_deref(), matches!(k, K::Ch('O'))) {
                     self.start_edit(d, &id, true, true);
                 }

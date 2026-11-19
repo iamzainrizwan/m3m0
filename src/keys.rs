@@ -58,7 +58,7 @@ pub const HELP: &[Group] = &[
     Group {
         title: "notes: edit",
         keys: &[
-            ("i / I", "edit bullet, cursor at start"),
+            ("i / I", "edit bullet, cursor at start (empty page: first bullet)"),
             ("a / A", "edit bullet, cursor at end"),
             ("o / O", "new bullet below / above (below = first child if open)"),
             ("dd", "delete bullet and everything under it"),
