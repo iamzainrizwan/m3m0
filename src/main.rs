@@ -343,8 +343,9 @@ impl App {
         rx
     }
 
-    /// Tree `o`: stage the next "Week N" (a RemNote document) after the module's
-    /// last week, and open it.
+    /// Tree `o`: stage the next "Week N - title" (a RemNote document) after the
+    /// module's last week, and open it. Number and title come from
+    /// uni-git/<module>/data/module.json when there is one (reading weeks skipped).
     fn new_week(&mut self, d: &mut Loaded, trows: &[(String, bool)]) {
         let Some((id, is_mod)) = trows.get(self.tree_cur).cloned() else { return };
         let m = if is_mod {
@@ -360,9 +361,24 @@ impl App {
             let rest = d.kb.name(k).strip_prefix("Week")?.trim_start().to_owned();
             rest.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()
         };
-        let next = kids.iter().filter_map(num).max().map_or(1, |n| n + 1);
+        let last = kids.iter().filter_map(num).max().unwrap_or(0);
         let pos = kids.iter().rposition(|k| d.kb.name(k).starts_with("Week")).map_or(kids.len(), |i| i + 1);
-        let name = format!("Week {next}");
+        // uni-git/<module>/data/module.json: skip reading weeks, take the title
+        let mjson = pdf::uni_dir().join(d.kb.name(&m).to_lowercase()).join("data/module.json");
+        let weeks: Vec<serde_json::Value> = std::fs::read_to_string(&mjson)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .and_then(|v| v.get("weeks").and_then(|w| w.as_array()).cloned())
+            .unwrap_or_default();
+        let entry = |n: u32| weeks.iter().find(|w| w.get("week").and_then(|x| x.as_u64()) == Some(n as u64));
+        let mut next = last + 1;
+        while entry(next).is_some_and(|w| w.get("reading_week").and_then(|x| x.as_bool()) == Some(true)) {
+            next += 1;
+        }
+        let name = match entry(next).and_then(|w| w.get("title")).and_then(|t| t.as_str()) {
+            Some(t) => format!("Week {next} - {t}"),
+            None => format!("Week {next}"),
+        };
         let wid = self.changes.tmp_id();
         let line = edit::LineJson { kind: "plain".into(), front: serde_json::json!([name]), back: serde_json::json!([]), doc: true };
         self.changes.apply(&mut d.kb, edit::Op::Create { id: wid.clone(), parent: m.clone(), pos, line });
