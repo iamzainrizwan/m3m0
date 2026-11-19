@@ -70,9 +70,115 @@ fn answers_for(quiz: &Path) -> HashMap<String, Vec<(String, Value)>> {
     out
 }
 
+/// LaTeX text mode (quiz files) -> our inline markup, leaving $...$ alone:
+/// \texttt{x} -> `x`, \textbf{x} -> **x**, \emph/\textit{x} -> *x*, \, ~ -> space,
+/// \% \& \_ \# \$ -> the character, \ldots -> …, -- / --- -> dashes, quotes.
+pub fn latex_text(s: &str) -> String {
+    let mut out = String::new();
+    let mut in_math = false;
+    let cs: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    let arg = |i: usize| -> Option<(String, usize)> {
+        if cs.get(i) != Some(&'{') {
+            return None;
+        }
+        let mut depth = 0;
+        for (j, c) in cs.iter().enumerate().skip(i) {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some((cs[i + 1..j].iter().collect(), j + 1));
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    };
+    while i < cs.len() {
+        let c = cs[i];
+        if c == '$' {
+            in_math = !in_math;
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if in_math {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if c == '\\' {
+            let name: String = cs[i + 1..].iter().take_while(|c| c.is_ascii_alphabetic()).collect();
+            let after = i + 1 + name.len();
+            let wrap = |pre: &str, post: &str, out: &mut String| -> Option<usize> {
+                let (a, end) = arg(after)?;
+                out.push_str(pre);
+                out.push_str(&latex_text(&a));
+                out.push_str(post);
+                Some(end)
+            };
+            let next = match name.as_str() {
+                "texttt" | "verb" => wrap("`", "`", &mut out),
+                "textbf" => wrap("**", "**", &mut out),
+                "emph" | "textit" => wrap("*", "*", &mut out),
+                "text" | "textrm" | "textsf" | "mbox" | "url" => wrap("", "", &mut out),
+                "ldots" | "dots" => {
+                    out.push('…');
+                    Some(after)
+                }
+                "" => {
+                    // \, \; \% \& \_ \# \$ \{ \}
+                    let n = cs.get(i + 1).copied().unwrap_or(' ');
+                    match n {
+                        ',' | ';' | ' ' | '!' => out.push(' '),
+                        '%' | '&' | '_' | '#' | '{' | '}' => out.push(n),
+                        '$' => out.push_str("\\$"),
+                        _ => {
+                            out.push('\\');
+                            out.push(n);
+                        }
+                    }
+                    Some(i + 2)
+                }
+                _ => None,
+            };
+            match next {
+                Some(j) => i = j,
+                None => {
+                    // unknown command: keep its name readable, drop the backslash
+                    out.push_str(&name);
+                    i = after;
+                }
+            }
+            continue;
+        }
+        if c == '~' {
+            out.push(' ');
+            i += 1;
+            continue;
+        }
+        if c == '-' && cs.get(i + 1) == Some(&'-') {
+            let three = cs.get(i + 2) == Some(&'-');
+            out.push(if three { '—' } else { '–' });
+            i += if three { 3 } else { 2 };
+            continue;
+        }
+        if (c == '`' && cs.get(i + 1) == Some(&'`')) || (c == '\'' && cs.get(i + 1) == Some(&'\'')) {
+            out.push(if c == '`' { '“' } else { '”' });
+            i += 2;
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 fn tex_line(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, s: &str, size: f32, color: egui::Color32, bold: bool, bullet: Option<(&'static str, egui::Color32)>) {
-    // LaTeX text-mode quotes -> real ones
-    let s = &s.replace("``", "\u{201c}").replace("''", "\u{201d}");
+    let s = &latex_text(s);
     let spans = rich::inline(s, &|_| None, &rich::Side::default(), &mut || "c".into());
     let l = rich::Line { kind: rich::Kind::Plain, front: spans, back: vec![] };
     crate::render::line(ui, kb, math, &l, &crate::render::Style { size, color, bold, bullet });
@@ -162,7 +268,33 @@ pub fn quiz(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, path: &Path, src: &str,
     }
 }
 
-pub fn markdown(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, src: &str) {
+/// `[text](target)` -> link spans (Ref with id "link:<target>" and a label),
+/// the rest through the normal inline parser.
+fn md_spans(s: &str) -> Vec<rich::Span> {
+    let mut out = vec![];
+    let mut rest = s;
+    while let Some(open) = rest.find('[') {
+        let after = &rest[open + 1..];
+        let (Some(close), true) = (after.find("]("), true) else { break };
+        let Some(end) = after[close + 2..].find(')') else { break };
+        let label = &after[..close];
+        let target = &after[close + 2..close + 2 + end];
+        out.extend(rich::inline(&rest[..open], &|_| None, &rich::Side::default(), &mut || "c".into()));
+        let mut extra = serde_json::Map::new();
+        extra.insert("label".into(), Value::String(label.to_owned()));
+        out.push(rich::Span::Ref { id: format!("link:{target}"), cloze: None, extra });
+        rest = &after[close + 2 + end + 1..];
+    }
+    out.extend(rich::inline(rest, &|_| None, &rich::Side::default(), &mut || "c".into()));
+    out
+}
+
+/// Markdown. Returns the on-screen rects of links with their targets.
+pub fn markdown(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, src: &str) -> Vec<(egui::Rect, String)> {
+    let mut links: Vec<(egui::Rect, String)> = vec![];
+    let keep = |v: Vec<(egui::Rect, String)>, links: &mut Vec<(egui::Rect, String)>| {
+        links.extend(v.into_iter().filter_map(|(r, id)| id.strip_prefix("link:").map(|t| (r, t.to_owned()))));
+    };
     let mut code: Option<String> = None;
     for raw in src.lines() {
         if raw.trim_start().starts_with("```") {
@@ -182,6 +314,9 @@ pub fn markdown(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, src: &str) {
             c.push('\n');
             continue;
         }
+        if raw.trim_start().starts_with("<!--") {
+            continue; // html comments (generator notes)
+        }
         let line = raw.replace("$$", "$");
         let t = line.trim_start();
         if t.is_empty() {
@@ -196,7 +331,9 @@ pub fn markdown(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, src: &str) {
                 _ => 15.5,
             };
             ui.add_space(6.0);
-            tex_line(ui, kb, math, h, size, FG_BRIGHT, true, None);
+            let l = rich::Line { kind: rich::Kind::Plain, front: md_spans(h), back: vec![] };
+            let r = crate::render::line(ui, kb, math, &l, &crate::render::Style { size, color: FG_BRIGHT, bold: true, bullet: None });
+            keep(r, &mut links);
             continue;
         }
         if t.starts_with("|") {
@@ -204,9 +341,15 @@ pub fn markdown(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, src: &str) {
             continue;
         }
         let bullet = t.strip_prefix("- ").or(t.strip_prefix("* "));
+        let has_link = t.contains("](");
         ui.horizontal_top(|ui| {
             ui.add_space(depth as f32 * 16.0);
             match bullet {
+                Some(b) if has_link => {
+                    let l = rich::Line { kind: rich::Kind::Plain, front: md_spans(b), back: vec![] };
+                    let r = crate::render::line(ui, kb, math, &l, &crate::render::Style { size: NOTE_TEXT - 1.0, color: FG, bold: false, bullet: Some(("•", if depth == 0 { RED } else { COMMENT })) });
+                    keep(r, &mut links);
+                }
                 // deck syntax bullets (Claude's decks) show their card markers
                 Some(b) => {
                     let mut l = rich::text_to_line(b, &|_| None, &rich::Side::default(), &mut || "c".into());
@@ -216,10 +359,16 @@ pub fn markdown(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, src: &str) {
                     }
                     crate::render::line(ui, kb, math, &l, &crate::render::Style { size: NOTE_TEXT - 1.0, color: FG, bold, bullet: Some(("•", if depth == 0 { RED } else { COMMENT })) });
                 }
+                None if has_link => {
+                    let l = rich::Line { kind: rich::Kind::Plain, front: md_spans(t), back: vec![] };
+                    let r = crate::render::line(ui, kb, math, &l, &crate::render::Style { size: NOTE_TEXT - 1.0, color: FG, bold: false, bullet: None });
+                    keep(r, &mut links);
+                }
                 None => tex_line(ui, kb, math, t, NOTE_TEXT - 1.0, FG, false, None),
             }
         });
     }
+    links
 }
 
 pub fn json(ui: &mut egui::Ui, src: &str) {
@@ -249,5 +398,18 @@ pub fn image(ui: &mut egui::Ui, cache: &mut HashMap<PathBuf, Option<TextureHandl
         None => {
             ui.colored_label(RED_BRIGHT, "can't open image");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::latex_text;
+
+    #[test]
+    fn latex_text_mode() {
+        assert_eq!(latex_text(r"the address \texttt{127.0.0.1}?"), "the address `127.0.0.1`?");
+        assert_eq!(latex_text(r"26.855\,ms and 50\% --- ok"), "26.855 ms and 50% — ok");
+        assert_eq!(latex_text(r"``quoted'' and $\frac{1}{2}\,x$"), "“quoted” and $\\frac{1}{2}\\,x$");
+        assert_eq!(latex_text(r"\emph{this} \textbf{bold}"), "*this* **bold**");
     }
 }

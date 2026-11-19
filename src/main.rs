@@ -185,6 +185,8 @@ struct App {
     review: Option<review::Review>,
     quit_after_commit: bool,
     quit_now: bool,
+    replay_chunk: usize,
+    replay_at: f64,
     last_search: Option<String>,
     links: std::collections::HashMap<String, String>,
 }
@@ -314,6 +316,8 @@ impl App {
             review: None,
             quit_after_commit: false,
             quit_now: false,
+            replay_chunk: 0,
+            replay_at: 0.0,
             last_search: None,
             links: deck::load_links(),
         }
@@ -752,6 +756,27 @@ impl App {
 
     /// Keys while the PDF panel has focus. Returns true if handled.
     fn pdf_key(&mut self, prefix: &str, k: K, n: usize) -> bool {
+        // link hints: letters pick a link, esc cancels
+        if self.pdfs.hinting.is_some() {
+            match k {
+                K::Ch(c) if c.is_ascii_lowercase() => self.pdfs.hint_key(c),
+                _ => self.pdfs.hinting = None,
+            }
+            return true;
+        }
+        match k {
+            K::Ch('f') if !self.pdfs.links.is_empty() => {
+                self.pdfs.hinting = Some(String::new());
+                return true;
+            }
+            K::Ch('b') | K::Back => {
+                if !self.pdfs.go_back() {
+                    self.msg = Some("nothing to go back to".into());
+                }
+                return true;
+            }
+            _ => {}
+        }
         // non-PDF files scroll as text; a toggles quiz answers
         if self.pdfs.current_kind().is_some_and(|x| x != files::FileKind::Pdf) {
             let line = 60.0 * n as f32;
@@ -1284,20 +1309,30 @@ impl eframe::App for App {
             if std::env::var("M3M0_SHOTS").is_ok() {
                 ks.clear(); // previews: only replayed keys
             }
-            // M3M0_KEYS replays keys once after boot, for previews ("~b" = ctrl-b, "\n" = enter)
+            // M3M0_KEYS replays keys after boot, for previews ("~b" = ctrl-b,
+            // "\n" = enter, "\x1b" = esc, "|" = wait ~0.6 s for the UI to settle)
             if let (Ok(s), false) = (std::env::var("M3M0_KEYS"), self.replayed) {
-                if self.data.as_ref().is_some_and(|d| d.is_ok()) {
-                    self.replayed = true;
-                    let mut it = s.chars();
-                    while let Some(c) = it.next() {
-                        ks.push(match c {
-                            '~' => K::Ctrl(it.next().unwrap_or(' ')),
-                            '\n' => K::Enter,
-                            '\u{1b}' => K::Esc,
-                            c => K::Ch(c),
-                        });
+                let now = ctx.input(|i| i.time);
+                if self.data.as_ref().is_some_and(|d| d.is_ok()) && now >= self.replay_at {
+                    let chunks: Vec<&str> = s.split('|').collect();
+                    if let Some(chunk) = chunks.get(self.replay_chunk) {
+                        let mut it = chunk.chars();
+                        while let Some(c) = it.next() {
+                            ks.push(match c {
+                                '~' => K::Ctrl(it.next().unwrap_or(' ')),
+                                '\n' => K::Enter,
+                                '\u{1b}' => K::Esc,
+                                c => K::Ch(c),
+                            });
+                        }
+                        self.replay_chunk += 1;
+                        self.replay_at = now + 0.6;
+                    }
+                    if self.replay_chunk >= chunks.len() {
+                        self.replayed = true;
                     }
                 }
+                ctx.request_repaint();
             }
             for k in ks {
                 self.handle(ctx, k);

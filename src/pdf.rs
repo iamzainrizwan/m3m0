@@ -167,6 +167,12 @@ pub struct Pdfs {
     pub text_scroll: f32,
     pub set_text_scroll: bool,
     pub show_answers: bool,
+    /// links visible in the current markdown file (screen rect, absolute target)
+    pub links: Vec<(egui::Rect, String)>,
+    /// `f` pressed: link hints are showing; typed letters so far
+    pub hinting: Option<String>,
+    /// files visited via links, for `b` / backspace
+    pub back: Vec<(usize, f32)>,
 }
 
 impl Pdfs {
@@ -174,7 +180,7 @@ impl Pdfs {
         let (tx, wrx) = channel();
         let (wtx, rx) = channel();
         std::thread::spawn(move || worker(wrx, wtx, repaint));
-        Pdfs { tx, rx, files: vec![], n_week: 0, cur: 0, sizes: HashMap::new(), tex: HashMap::new(), asked: HashSet::new(), scroll: 0.0, zoom: 1.0, key: None, texts: HashMap::new(), images: HashMap::new(), text_scroll: 0.0, set_text_scroll: true, show_answers: false }
+        Pdfs { tx, rx, files: vec![], n_week: 0, cur: 0, sizes: HashMap::new(), tex: HashMap::new(), asked: HashSet::new(), scroll: 0.0, zoom: 1.0, key: None, texts: HashMap::new(), images: HashMap::new(), text_scroll: 0.0, set_text_scroll: true, show_answers: false, links: vec![], hinting: None, back: vec![] }
     }
 
     pub fn set_week(&mut self, module: &str, week_name: &str) {
@@ -191,6 +197,55 @@ impl Pdfs {
         self.open_cur();
     }
 
+    /// Open a link target: http(s) in the browser, files in this pane (added
+    /// to the list if they weren't in it). `b` goes back.
+    pub fn follow(&mut self, target: &str) {
+        self.hinting = None;
+        if target.starts_with("http://") || target.starts_with("https://") {
+            let _ = std::process::Command::new("xdg-open").arg(target).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).spawn();
+            return;
+        }
+        let p = std::fs::canonicalize(target).unwrap_or_else(|_| PathBuf::from(target));
+        if !p.exists() {
+            return;
+        }
+        self.back.push((self.cur, self.text_scroll));
+        let i = match self.files.iter().position(|f| std::fs::canonicalize(f).ok().as_ref() == Some(&p)) {
+            Some(i) => i,
+            None => {
+                self.files.push(p);
+                self.files.len() - 1
+            }
+        };
+        self.cur = i;
+        self.open_cur();
+    }
+
+    pub fn go_back(&mut self) -> bool {
+        let Some((i, sc)) = self.back.pop() else { return false };
+        self.cur = i.min(self.files.len().saturating_sub(1));
+        self.open_cur();
+        self.text_scroll = sc;
+        self.set_text_scroll = true;
+        true
+    }
+
+    /// A typed hint letter: follow when it uniquely names a link.
+    pub fn hint_key(&mut self, c: char) {
+        let Some(mut typed) = self.hinting.take() else { return };
+        typed.push(c);
+        let n = self.links.len();
+        let hits: Vec<usize> = (0..n).filter(|&i| hint_label(i, n).starts_with(&typed)).collect();
+        match hits.as_slice() {
+            [] => {}
+            [one] if hint_label(*one, n) == typed => {
+                let t = self.links[*one].1.clone();
+                self.follow(&t);
+            }
+            _ => self.hinting = Some(typed),
+        }
+    }
+
     pub fn current_kind(&self) -> Option<crate::files::FileKind> {
         self.files.get(self.cur).map(|p| crate::files::kind(p))
     }
@@ -205,6 +260,8 @@ impl Pdfs {
         self.text_scroll = 0.0;
         self.set_text_scroll = true;
         self.show_answers = false;
+        self.hinting = None;
+        self.links.clear();
         if let Some(p) = self.files.get(self.cur) {
             if crate::files::kind(p) != crate::files::FileKind::Pdf {
                 self.texts.remove(p); // re-read: Claude may have edited it
@@ -256,6 +313,7 @@ impl Pdfs {
             self.set_text_scroll = false;
         }
         let (texts, images, show_answers) = (&mut self.texts, &mut self.images, self.show_answers);
+        let mut links: Vec<(egui::Rect, String)> = vec![];
         let out = sa.show(ui, |ui| {
             if k == FileKind::Image {
                 files::image(ui, images, &path);
@@ -264,11 +322,56 @@ impl Pdfs {
             let src = texts.entry(path.clone()).or_insert_with(|| std::fs::read_to_string(&path).unwrap_or_else(|e| format!("can't read: {e}"))).clone();
             match k {
                 FileKind::Quiz => files::quiz(ui, kb, math, &path, &src, show_answers),
-                FileKind::Markdown => files::markdown(ui, kb, math, &src),
+                FileKind::Markdown => links = files::markdown(ui, kb, math, &src),
                 FileKind::Json => files::json(ui, &src),
                 _ => files::text(ui, &src),
             }
         });
+        // resolve link targets against this file's folder; keep only on-screen ones
+        let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+        let clip = out.inner_rect;
+        self.links = links
+            .into_iter()
+            .filter(|(r, _)| clip.intersects(*r))
+            .map(|(r, t)| {
+                let t = t.split('#').next().unwrap_or("").to_owned();
+                let abs = if t.starts_with("http://") || t.starts_with("https://") || t.is_empty() { t } else { dir.join(&t).to_string_lossy().into_owned() };
+                (r, abs)
+            })
+            .filter(|(_, t)| !t.is_empty())
+            .collect();
+        // a multi-word link is several pieces: one entry (and one hint) per link
+        let mut merged: Vec<(egui::Rect, String)> = vec![];
+        for (r, t) in std::mem::take(&mut self.links) {
+            match merged.last_mut() {
+                Some((lr, lt)) if *lt == t && (lr.right() - r.left()).abs() < 2.0 => *lr = lr.union(r),
+                _ => merged.push((r, t)),
+            }
+        }
+        self.links = merged;
+        // clicks follow links
+        if let Some(pos) = ui.input(|i| if i.pointer.primary_clicked() { i.pointer.interact_pos() } else { None }) {
+            if let Some((_, t)) = self.links.iter().find(|(r, _)| r.contains(pos)).cloned() {
+                self.follow(&t);
+            }
+        }
+        if ui.rect_contains_pointer(clip) && self.links.iter().any(|(r, _)| ui.input(|i| i.pointer.hover_pos()).is_some_and(|p| r.contains(p))) {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
+        // link hints (f)
+        if let Some(typed) = &self.hinting {
+            let p = ui.painter();
+            for (i, (r, _)) in self.links.iter().enumerate() {
+                let label = hint_label(i, self.links.len());
+                if !label.starts_with(typed.as_str()) {
+                    continue;
+                }
+                let at = r.left_top() - egui::vec2(2.0, 2.0);
+                let g = p.text(at, egui::Align2::RIGHT_TOP, &label, egui::FontId::monospace(12.0), crate::theme::BG);
+                p.rect_filled(g.expand(2.0), 0.0, crate::theme::RED_BRIGHT);
+                p.text(at, egui::Align2::RIGHT_TOP, &label, egui::FontId::monospace(12.0), crate::theme::BG);
+            }
+        }
         // mouse-wheel scrolling feeds back so keys continue from there
         self.text_scroll = out.state.offset.y;
         let max = (out.content_size.y - out.inner_rect.height()).max(0.0);
@@ -357,5 +460,15 @@ impl Pdfs {
             Some(Ok(s)) => s.iter().map(|(w, h)| width * h / w.max(1.0)).collect(),
             _ => vec![],
         }
+    }
+}
+
+/// Home-row hint labels: one letter while they suffice, then two.
+pub fn hint_label(i: usize, n: usize) -> String {
+    const K: &[u8] = b"asdfjklghqwertyuiopzxcvbnm";
+    if n <= K.len() {
+        (K[i] as char).to_string()
+    } else {
+        format!("{}{}", K[i / K.len() % K.len()] as char, K[i % K.len()] as char)
     }
 }

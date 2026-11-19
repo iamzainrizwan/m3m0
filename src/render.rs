@@ -72,8 +72,9 @@ fn pieces(ui: &egui::Ui, kb: &Kb, math: &mut Math, sp: &[Span], st: &Style, out:
                     None => out.push(text_piece(ui, RichText::new(format!("${tex}$")).monospace().size(st.size - 1.0).color(RED_BRIGHT), None)),
                 }
             }
-            Span::Ref { id, cloze, .. } => {
-                let name = kb.name(id);
+            Span::Ref { id, cloze, extra } => {
+                // markdown links ride on Ref spans with their label in `extra`
+                let name = extra.get("label").and_then(|l| l.as_str()).map(str::to_owned).unwrap_or_else(|| kb.name(id));
                 let name = if name.is_empty() { "(empty)".to_owned() } else { name };
                 for w in name.split_inclusive(' ') {
                     let mut r = RichText::new(w).size(st.size).color(RED_BRIGHT).underline();

@@ -37,6 +37,16 @@ pub fn install(ctx: &egui::Context) {
         let p = fonts.families[&FontFamily::Proportional].clone();
         fonts.families.insert(FontFamily::Name("bold".into()), p);
     }
+    // fallback for symbols BlexMono lacks (⇒, ∀, box drawing...): DejaVu Sans
+    for f in ["/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf", "/usr/share/fonts/TTF/DejaVuSans.ttf"] {
+        if let Ok(bytes) = std::fs::read(f) {
+            fonts.font_data.insert("fallback".into(), FontData::from_owned(bytes).into());
+            for fam in fonts.families.values_mut() {
+                fam.push("fallback".into());
+            }
+            break;
+        }
+    }
     ctx.set_fonts(fonts);
 
     let mut v = egui::Visuals::dark();
