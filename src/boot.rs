@@ -1,6 +1,7 @@
 //! Boot animation: a drifting note graph collapses into the dot-matrix logo,
 //! a red scan sweeps it into solid blocks, the boot log types out real stats,
-//! then the logo flies into the top bar. Any key or click skips ahead.
+//! then the logo flies into the top bar. Any key or click skips straight to the
+//! finished logo (no graph), which flies up as soon as the data is in.
 
 use crate::theme::*;
 use eframe::egui::{self, Align2, Color32, CornerRadius, FontId, Pos2, Rect, Vec2};
@@ -114,11 +115,20 @@ impl Boot {
             return;
         }
         let now = ctx.input(|i| i.time);
-        let t = (now - *self.t0.get_or_insert(now)) as f32;
+        let mut t = (now - *self.t0.get_or_insert(now)) as f32;
         let n_lines = log.map_or(1, |l| l.len()) as f32;
         let natural_end = LOG + n_lines * LINE_GAP + 0.55;
-        if ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::PointerButton { pressed: true, .. }))) {
-            self.skip_at.get_or_insert(t);
+        if self.skip_at.is_none() && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Key { pressed: true, .. } | egui::Event::PointerButton { pressed: true, .. }))) {
+            // skipping drops the drifting graph: jump to the formed logo
+            // (graph faded by 1.5 s, scan and glitch done by MORPH + 0.6)
+            let formed = MORPH + 0.6;
+            if t < formed {
+                if let Some(t0) = &mut self.t0 {
+                    *t0 -= (formed - t) as f64;
+                }
+                t = formed;
+            }
+            self.skip_at = Some(t);
         }
         // fly-out starts at the natural end (or on skip), but never before the data is in
         let fly_start = match (log, self.skip_at) {
