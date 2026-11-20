@@ -54,6 +54,10 @@ pub fn home() -> PathBuf {
     std::env::var("HOME").map(PathBuf::from).unwrap_or_else(|_| "/".into())
 }
 
+/// RemNote's built-in List Item power-up (numbered items), as a `tp` key
+/// (rems made through the plugin SDK carry `apu.i.v = true` instead).
+pub const LIST_ITEM: &str = "fOrVD4qTUWGt8uKzW";
+
 pub struct Kb {
     pub q: HashMap<String, Value>,
     pub kids: HashMap<Option<String>, Vec<String>>,
@@ -297,6 +301,13 @@ impl Kb {
     }
 
     /// Not in the tree (alias rems): not a [[ref]] target by name either.
+    /// Tagged with the List Item power-up: a numbered item (ordered >>> card).
+    pub fn is_list_item(&self, i: &str) -> bool {
+        // RemNote's own: the tag; made through the plugin SDK: only `apu.i`
+        let Some(d) = self.q.get(i) else { return false };
+        d.get("tp").and_then(|t| t.get(LIST_ITEM)).is_some() || d.pointer("/apu/i/v").and_then(Value::as_bool) == Some(true)
+    }
+
     pub fn is_hidden(&self, i: &str) -> bool {
         match self.q.get(i).and_then(|d| d.get("parent")).and_then(Value::as_str) {
             Some(p) => !self.children(Some(p)).iter().any(|k| k == i),

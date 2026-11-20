@@ -401,7 +401,7 @@ impl App {
             None => format!("Week {next}"),
         };
         let wid = self.changes.tmp_id();
-        let line = edit::LineJson { kind: "plain".into(), front: serde_json::json!([name]), back: serde_json::json!([]), doc: true };
+        let line = edit::LineJson { kind: "plain".into(), front: serde_json::json!([name]), back: serde_json::json!([]), doc: true, list: None };
         self.changes.apply(&mut d.kb, edit::Op::Create { id: wid.clone(), parent: m.clone(), pos, line });
         self.open_mods.insert(m);
         self.tree_cur = tree_rows(d, &self.open_mods).iter().position(|r| r.0 == wid).unwrap_or(self.tree_cur);
@@ -2178,6 +2178,8 @@ impl App {
                                                 (true, false) => ("•", RED),
                                                 _ => ("•", COMMENT),
                                             };
+                                            // ordered >>> card items show their number
+                                            let b = if d.kb.is_list_item(id) { list_number(&d.kb, id).unwrap_or(b) } else { b };
                                             let st = render::Style { size: NOTE_TEXT, color: FG, bold: false, bullet: Some((b, c)) };
                                             refs = render::line(ui, &d.kb, math, &line, &st);
                                         }
@@ -2728,7 +2730,7 @@ impl App {
                 skipped += 1;
                 continue;
             }
-            let after = edit::LineJson { kind: before.kind.clone(), front: e.get("front").cloned().unwrap_or_else(|| before.front.clone()), back: e.get("back").cloned().unwrap_or_else(|| before.back.clone()), doc: before.doc };
+            let after = edit::LineJson { kind: before.kind.clone(), front: e.get("front").cloned().unwrap_or_else(|| before.front.clone()), back: e.get("back").cloned().unwrap_or_else(|| before.back.clone()), doc: before.doc, list: None };
             if after != before {
                 self.changes.apply(&mut d.kb, edit::Op::Update { id: id.to_owned(), before, after });
                 n += 1;
@@ -2755,7 +2757,7 @@ fn apply_file(path: &str) -> i32 {
     for e in list {
         let Some(id) = e["id"].as_str().filter(|i| kb.q.contains_key(*i)) else { continue };
         let before = edit::LineJson::of(&kb.line_of(id));
-        let after = edit::LineJson { kind: before.kind.clone(), front: e.get("front").cloned().unwrap_or_else(|| before.front.clone()), back: e.get("back").cloned().unwrap_or_else(|| before.back.clone()), doc: before.doc };
+        let after = edit::LineJson { kind: before.kind.clone(), front: e.get("front").cloned().unwrap_or_else(|| before.front.clone()), back: e.get("back").cloned().unwrap_or_else(|| before.back.clone()), doc: before.doc, list: None };
         if after != before {
             ops.push(edit::Op::Update { id: id.to_owned(), before, after });
         }
@@ -2890,13 +2892,14 @@ fn commit_test(keep: bool) -> i32 {
         Op::Create { id: "tmp-3".into(), parent: "tmp-1".into(), pos: 0, line: lj("C child of A") },
         Op::Move { id: "tmp-3".into(), from: ("tmp-1".into(), 0), to: (root.clone(), 0) },
         Op::Create { id: "tmp-4".into(), parent: root.clone(), pos: 3, line: lj("D list") },
-        Op::Create { id: "tmp-5".into(), parent: "tmp-4".into(), pos: 0, line: lj("item one") },
-        Op::Create { id: "tmp-6".into(), parent: "tmp-4".into(), pos: 1, line: lj("item two") },
+        // ordered >>> card: numbered items (List Item power-up)
+        Op::Create { id: "tmp-5".into(), parent: "tmp-4".into(), pos: 0, line: LineJson { list: Some(true), ..lj("item one") } },
+        Op::Create { id: "tmp-6".into(), parent: "tmp-4".into(), pos: 1, line: LineJson { list: Some(true), ..lj("item two") } },
         Op::Update { id: "tmp-4".into(), before: lj("D list"), after: lj("D list >>>") },
         Op::Create { id: "tmp-7".into(), parent: root.clone(), pos: 4, line: lj("## a heading") },
         Op::Delete { id: "tmp-2".into(), parent: root.clone(), pos: 2, docs: vec![] },
         // [[A|ay]]: creates an alias of A and refers through it (twice: reused)
-        Op::Create { id: "tmp-8".into(), parent: root.clone(), pos: 5, line: LineJson { kind: "plain".into(), front: json!(["E sees ", {"i":"q","_id":"tmp-1","aliasText":"ay"}, " and ", {"i":"q","_id":"tmp-1","aliasText":"ay"}]), back: json!([]), doc: false } },
+        Op::Create { id: "tmp-8".into(), parent: root.clone(), pos: 5, line: LineJson { kind: "plain".into(), front: json!(["E sees ", {"i":"q","_id":"tmp-1","aliasText":"ay"}, " and ", {"i":"q","_id":"tmp-1","aliasText":"ay"}]), back: json!([]), doc: false, list: None } },
     ];
     let mut children = std::collections::HashMap::new();
     children.insert("tmp-4".to_string(), vec!["tmp-5".to_string(), "tmp-6".to_string()]);
@@ -3034,6 +3037,14 @@ fn answer(ui: &mut egui::Ui, kb: &Kb, math: &mut math::Math, text: &str) {
 }
 
 /// "1 change", "3 changes"
+/// "3." for the third numbered item among its siblings.
+fn list_number(kb: &Kb, id: &str) -> Option<&'static str> {
+    static NUMS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let p = kb.q.get(id)?.get("parent")?.as_str()?;
+    let n = kb.children(Some(p)).iter().filter(|k| kb.is_list_item(k)).position(|k| k == id)?;
+    NUMS.get_or_init(|| (1..=500).map(|n| format!("{n}.")).collect()).get(n).map(String::as_str)
+}
+
 /// The page (module week) a rem is on: the ancestor whose parent is a module.
 fn page_of(d: &Loaded, id: &str) -> Option<String> {
     let mut cur = id.to_owned();

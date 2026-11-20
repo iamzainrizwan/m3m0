@@ -26,11 +26,15 @@ pub struct LineJson {
     /// make the rem a RemNote document (a page), e.g. a new week
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub doc: bool,
+    /// numbered list item (RemNote's List Item power-up): the items of an
+    /// ordered >>> card. None = leave as it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub list: Option<bool>,
 }
 
 impl LineJson {
     pub fn of(l: &Line) -> LineJson {
-        LineJson { kind: kind_name(l.kind), front: to_rt(&l.front), back: to_rt(&l.back), doc: false }
+        LineJson { kind: kind_name(l.kind), front: to_rt(&l.front), back: to_rt(&l.back), doc: false, list: None }
     }
     pub fn line(&self) -> Line {
         Line {
@@ -215,7 +219,7 @@ pub fn inverse(op: &Op) -> Op {
             parent: parent.clone(),
             pos: *pos,
             // restore from the saved docs (handled in apply via the Restore path)
-            line: LineJson { kind: "__restore__".into(), front: json!(docs), back: Value::Null, doc: false },
+            line: LineJson { kind: "__restore__".into(), front: json!(docs), back: Value::Null, doc: false, list: None },
         },
         Op::Move { id, from, to } => Op::Move { id: id.clone(), from: to.clone(), to: from.clone() },
     }
@@ -242,10 +246,18 @@ fn apply(kb: &mut Kb, op: &Op) {
         Op::Create { id, parent, pos, line } => {
             kb.q.insert(id.clone(), json!({ "_id": id, "parent": parent }));
             set_line(kb, id, &line.line());
+            if let Some(l) = line.list {
+                set_list(kb, id, l);
+            }
             let sibs = kb.kids.entry(Some(parent.clone())).or_default();
             sibs.insert((*pos).min(sibs.len()), id.clone());
         }
-        Op::Update { id, after, .. } => set_line(kb, id, &after.line()),
+        Op::Update { id, after, .. } => {
+            set_line(kb, id, &after.line());
+            if let Some(l) = after.list {
+                set_list(kb, id, l);
+            }
+        }
         Op::Delete { id, parent, .. } => {
             if let Some(s) = kb.kids.get_mut(&Some(parent.clone())) {
                 s.retain(|k| k != id);
@@ -283,6 +295,19 @@ pub fn subtree(kb: &Kb, id: &str) -> Vec<String> {
 /// Snapshot of a subtree's docs, for Delete (so undo can restore it).
 pub fn snapshot(kb: &Kb, id: &str) -> Vec<(String, Value)> {
     subtree(kb, id).into_iter().filter_map(|k| kb.q.get(&k).map(|d| (k, d.clone()))).collect()
+}
+
+/// Tag / untag a rem with RemNote's List Item power-up (numbered item).
+pub fn set_list(kb: &mut Kb, id: &str, on: bool) {
+    let Some(o) = kb.q.get_mut(id).and_then(Value::as_object_mut) else { return };
+    let tp = o.entry("tp").or_insert_with(|| json!({}));
+    if let Some(tp) = tp.as_object_mut() {
+        if on {
+            tp.insert(crate::kb::LIST_ITEM.into(), json!({ "t": false }));
+        } else {
+            tp.remove(crate::kb::LIST_ITEM);
+        }
+    }
 }
 
 /// Write a Line into a rem's doc so `Kb::line_of` reads it back. The `m3m0`

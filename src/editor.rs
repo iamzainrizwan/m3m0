@@ -28,6 +28,8 @@ pub struct Editing {
     pub mode: LineMode,
     /// pending operator in line-normal mode: d c y, then i / f t F T
     pub op: String,
+    /// set the List Item flag on save (typed `1.` in a >>> card's item)
+    pub list: Option<bool>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -185,7 +187,7 @@ impl App {
         let mut side = rich::Side::default();
         let buf = rich::line_to_text(&orig, &|r| d.kb.name(r), &mut side);
         let at = if at_end { buf.chars().count() } else { 0 };
-        self.editing = Some(Editing { id: id.to_owned(), buf, side, orig, fresh: true, created, ac: None, sel: (at, at), push: true, undo: None, slash: None, mode: LineMode::Insert, op: String::new() });
+        self.editing = Some(Editing { id: id.to_owned(), buf, side, orig, fresh: true, created, ac: None, sel: (at, at), push: true, undo: None, slash: None, mode: LineMode::Insert, op: String::new(), list: None });
         self.focus = Focus::Notes;
     }
 
@@ -204,13 +206,22 @@ impl App {
         }
         let near = e.id.clone();
         let line = rich::text_to_line(&e.buf, &|n| d.kb.resolve(n, Some(&near)), &e.side, &mut cloze_id);
-        let (before, after) = (LineJson::of(&e.orig), LineJson::of(&line));
+        let (mut before, mut after) = (LineJson::of(&e.orig), LineJson::of(&line));
+        if let Some(l) = e.list {
+            before.list = Some(d.kb.is_list_item(&e.id));
+            after.list = Some(l);
+        }
         // a bullet just made with o/O/enter: fold the text into its Create
         if e.created {
             if let Some(Op::Create { id, line: l, .. }) = self.changes.ops.last_mut() {
                 if *id == e.id {
+                    after.list = after.list.or(l.list);
+                    let list = after.list;
                     *l = after;
                     crate::edit::set_line(&mut d.kb, &e.id, &line);
+                    if let Some(on) = list {
+                        crate::edit::set_list(&mut d.kb, &e.id, on);
+                    }
                     return Some(e.id);
                 }
             }
@@ -320,6 +331,30 @@ impl App {
                 self.start_edit(d, &n, true, true);
             }
         }
+    }
+
+    /// Number every item of >>> card `card` (the one being typed, `editing`,
+    /// gets it when saved).
+    fn make_ordered(&mut self, d: &mut Loaded, card: &str, editing: &str) {
+        self.changes.begin();
+        for k in d.kb.children(Some(card)).to_vec() {
+            if k == editing || d.kb.is_list_item(&k) {
+                continue;
+            }
+            let l = LineJson::of(&d.kb.line_of(&k));
+            let (mut before, mut after) = (l.clone(), l);
+            before.list = Some(false);
+            after.list = Some(true);
+            self.changes.apply(&mut d.kb, Op::Update { id: k, before, after });
+        }
+        self.changes.end();
+        if let Some(e) = &mut self.editing {
+            e.buf = e.buf[2..].trim_start().to_owned();
+            e.sel = (0, 0);
+            e.push = true;
+            e.list = Some(true);
+        }
+        self.msg = Some("ordered card: its items are numbered".into());
     }
 
     /// `J`: append the next bullet's text to this one (its children move over).
@@ -711,7 +746,12 @@ impl App {
         };
         let id = self.changes.tmp_id();
         let line = rich::Line { kind: rich::Kind::Plain, front: vec![], back: vec![] };
-        self.changes.apply(&mut d.kb, Op::Create { id: id.clone(), parent, pos, line: LineJson::of(&line) });
+        let mut line = LineJson::of(&line);
+        // a new item of an ordered >>> card is numbered too
+        if d.kb.line_of(&parent).kind == rich::Kind::MultiLine && d.kb.children(Some(&parent)).iter().any(|k| d.kb.is_list_item(k)) {
+            line.list = Some(true);
+        }
+        self.changes.apply(&mut d.kb, Op::Create { id: id.clone(), parent, pos, line });
         self.cursor_to(d, &id);
         Some(id)
     }
@@ -975,6 +1015,16 @@ impl App {
                         return;
                     }
                     _ => {}
+                }
+            }
+        }
+        // `1. ` at the start of a >>> card's item: the card becomes ordered
+        if let (K::Ch(' '), Some(e)) = (k, &self.editing) {
+            if e.sel == (2, 2) && e.buf.starts_with("1.") {
+                let id = e.id.clone();
+                if let Some((p, _)) = Self::parent_pos(d, &id).filter(|(p, _)| d.kb.line_of(p).kind == rich::Kind::MultiLine) {
+                    self.make_ordered(d, &p, &id);
+                    return;
                 }
             }
         }

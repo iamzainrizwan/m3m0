@@ -76,6 +76,9 @@ fn fields(l: &LineJson, m: &HashMap<String, String>) -> Value {
     if l.doc {
         f["document"] = json!(true);
     }
+    if let Some(v) = l.list {
+        f["listItem"] = json!(v);
+    }
     f
 }
 
@@ -272,5 +275,5 @@ fn line_of_doc(d: &Value) -> LineJson {
             _ => "plain".into(),
         }
     };
-    LineJson { kind, front: d.get("key").cloned().unwrap_or(json!([])), back: d.get("value").cloned().unwrap_or(json!([])), doc: false }
+    LineJson { kind, front: d.get("key").cloned().unwrap_or(json!([])), back: d.get("value").cloned().unwrap_or(json!([])), doc: false, list: None }
 }

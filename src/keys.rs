@@ -120,6 +120,7 @@ pub const HELP: &[Group] = &[
             ("front >> back", "basic card, forward"),
             ("front <> back", "basic card, both ways"),
             ("front >>>", "multi-line card: the children are the answer"),
+            ("1. (start of an item)", "makes the >>> card ordered: its items are numbered (RemNote list items)"),
             ("front >>A)", "multiple choice (children = options; writes pending)"),
             ("{{text}}", "cloze"),
             ("$x^2$", "inline LaTeX (rendered like KaTeX)"),
