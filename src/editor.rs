@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::edit::{LineJson, Op};
+use crate::typing;
 use egui::text::{CCursor, CCursorRange};
 
 pub struct Editing {
@@ -11,12 +12,44 @@ pub struct Editing {
     pub buf: String,
     pub side: rich::Side,
     pub orig: rich::Line,
-    /// cursor goes to the end (a/A/o) or start (i/I) on the first frame
-    pub at_end: bool,
     pub fresh: bool,
     /// made by o/O/enter: dropped again if left empty
     pub created: bool,
     pub ac: Option<Ac>,
+    /// selection (anchor, caret) in chars, kept in step with the text box
+    pub sel: (usize, usize),
+    /// set when we changed text or caret: the box takes `sel` next frame
+    pub push: bool,
+    /// last automatic change (typing.rs), for backspace-to-undo
+    pub undo: Option<typing::Undo>,
+    /// `/` menu: char index of the `/`, highlighted item
+    pub slash: Option<(usize, usize)>,
+}
+
+impl Editing {
+    fn buf(&self) -> typing::Buf {
+        typing::Buf { text: self.buf.clone(), anchor: self.sel.0, caret: self.sel.1 }
+    }
+    fn set(&mut self, b: typing::Buf) {
+        self.buf = b.text;
+        self.sel = (b.anchor, b.caret);
+        self.push = true;
+    }
+    /// Open `/` menu items for what's typed after the `/`, if it's still open.
+    pub fn slash_items(&self) -> Option<Vec<usize>> {
+        let (start, _) = self.slash?;
+        let cs: Vec<char> = self.buf.chars().collect();
+        let caret = self.sel.1;
+        if cs.get(start) != Some(&'/') || caret <= start || caret > cs.len() {
+            return None;
+        }
+        let q: String = cs[start + 1..caret].iter().collect();
+        if !q.chars().all(|c| c.is_ascii_alphanumeric()) || q.len() > 12 {
+            return None;
+        }
+        let m = typing::slash_matches(&q);
+        (!m.is_empty()).then_some(m)
+    }
 }
 
 /// [[ autocomplete: matches for the text typed after the last unclosed `[[`.
@@ -38,23 +71,38 @@ fn cloze_id() -> String {
 }
 
 impl App {
-    /// While editing, only these keys are ours; everything else goes to the text box.
+    /// While editing, typed text and these keys are ours (typing.rs); the text
+    /// box keeps arrows, selection, paste, delete and shift-enter.
     pub(super) fn insert_keys(&mut self, ctx: &egui::Context) -> Vec<K> {
-        let ac_open = self.editing.as_ref().is_some_and(|e| e.ac.as_ref().is_some_and(|a| !a.items.is_empty()));
-        let empty = self.editing.as_ref().is_some_and(|e| e.buf.is_empty());
+        let menu = self.editing.as_ref().is_some_and(|e| e.ac.as_ref().is_some_and(|a| !a.items.is_empty()) || e.slash_items().is_some());
         let mut out = vec![];
         ctx.input_mut(|i| {
+            let mods = i.modifiers;
             i.events.retain(|e| {
+                if let egui::Event::Text(t) = e {
+                    if !mods.ctrl && !mods.alt {
+                        out.extend(t.chars().map(K::Ch));
+                        return false;
+                    }
+                    return true;
+                }
                 let egui::Event::Key { key, pressed, modifiers, .. } = e else { return true };
                 use egui::Key as E;
+                let plain = !modifiers.ctrl && !modifiers.alt;
                 let k = match key {
                     E::Escape => Some(K::Esc),
                     E::Enter if !modifiers.shift => Some(K::Enter),
                     E::Tab if modifiers.shift => Some(K::ShiftTab),
                     E::Tab => Some(K::Tab),
-                    E::Backspace if empty => Some(K::Back),
-                    E::ArrowDown | E::ArrowUp if ac_open => Some(if *key == E::ArrowDown { K::Down } else { K::Up }),
-                    E::N | E::P if ac_open && modifiers.ctrl => Some(if *key == E::N { K::Down } else { K::Up }),
+                    E::Backspace if plain => Some(K::Back),
+                    E::ArrowDown | E::ArrowUp if menu => Some(if *key == E::ArrowDown { K::Down } else { K::Up }),
+                    E::N | E::P if menu && modifiers.ctrl => Some(if *key == E::N { K::Down } else { K::Up }),
+                    E::B | E::I | E::M | E::Backtick if modifiers.ctrl && !modifiers.shift => Some(K::Ctrl(match key {
+                        E::B => 'b',
+                        E::I => 'i',
+                        E::M => 'm',
+                        _ => '`',
+                    })),
                     _ => None,
                 };
                 match k {
@@ -75,7 +123,8 @@ impl App {
         let orig = d.kb.line_of(id);
         let mut side = rich::Side::default();
         let buf = rich::line_to_text(&orig, &|r| d.kb.name(r), &mut side);
-        self.editing = Some(Editing { id: id.to_owned(), buf, side, orig, at_end, fresh: true, created, ac: None });
+        let at = if at_end { buf.chars().count() } else { 0 };
+        self.editing = Some(Editing { id: id.to_owned(), buf, side, orig, fresh: true, created, ac: None, sel: (at, at), push: true, undo: None, slash: None });
         self.focus = Focus::Notes;
     }
 
@@ -336,12 +385,15 @@ impl App {
                             let chars: Vec<char> = e.buf.chars().collect();
                             let before: String = chars[..ac.start].iter().collect();
                             let after: String = chars[ac.end..].iter().collect();
+                            // the ]] auto-paired with [[ is already there
+                            let after = after.strip_prefix("]]").unwrap_or(&after).to_owned();
                             let token = format!("[[{name}]]");
                             e.side.refs.insert(name.clone(), id);
                             e.buf = format!("{before}{token}{after}");
                             let at = ac.start + token.chars().count();
                             e.ac = None;
-                            self.pending_cursor = Some(at);
+                            e.sel = (at, at);
+                            e.push = true;
                             return;
                         }
                         K::Esc => {
@@ -353,12 +405,70 @@ impl App {
                 }
             }
         }
+        // `/` menu navigation / pick
+        if let Some(e) = &mut self.editing {
+            if let (Some(items), Some((start, cur))) = (e.slash_items(), e.slash) {
+                match k {
+                    K::Down => {
+                        e.slash = Some((start, (cur + 1) % items.len()));
+                        return;
+                    }
+                    K::Up => {
+                        e.slash = Some((start, (cur + items.len() - 1) % items.len()));
+                        return;
+                    }
+                    K::Tab | K::Enter => {
+                        let mut b = e.buf();
+                        typing::slash_apply(&mut b, start, items[cur.min(items.len() - 1)]);
+                        e.set(b);
+                        e.slash = None;
+                        e.undo = None;
+                        return;
+                    }
+                    K::Esc => {
+                        e.slash = None;
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
         match k {
-            // only replayed keys (M3M0_KEYS) arrive as Ch in insert mode: type them
             K::Ch(c) => {
                 if let Some(e) = &mut self.editing {
-                    e.buf.push(c);
-                    self.pending_cursor = Some(e.buf.chars().count());
+                    let mut b = e.buf();
+                    let lo = b.anchor.min(b.caret);
+                    let prev = lo.checked_sub(1).and_then(|i| e.buf.chars().nth(i));
+                    let opens = c == '/' && prev.is_none_or(char::is_whitespace) && typing::protected_at(&e.buf, lo).is_none();
+                    typing::type_char(&mut b, c, &mut e.undo);
+                    e.set(b);
+                    if opens {
+                        e.slash = Some((lo, 0));
+                    } else if e.slash.is_some() && e.slash_items().is_none() {
+                        e.slash = None;
+                    } else if let Some((s, _)) = e.slash {
+                        e.slash = Some((s, 0));
+                    }
+                }
+            }
+            K::Ctrl(c @ ('b' | 'i' | 'm' | '`')) => {
+                if let Some(e) = &mut self.editing {
+                    let mut b = e.buf();
+                    typing::wrap(&mut b, match c {
+                        'b' => "**",
+                        'i' => "*",
+                        'm' => "$",
+                        _ => "`",
+                    });
+                    e.set(b);
+                    e.undo = None;
+                }
+            }
+            K::Back if self.editing.as_ref().is_some_and(|e| !e.buf.is_empty()) => {
+                if let Some(e) = &mut self.editing {
+                    let mut b = e.buf();
+                    typing::backspace(&mut b, &mut e.undo);
+                    e.set(b);
                 }
             }
             K::Esc => {
@@ -431,7 +541,7 @@ pub fn edit_bullet(ui: &mut egui::Ui) {
 }
 
 /// The text box for the bullet being edited, plus the [[ autocomplete popup.
-pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb, pending_cursor: &mut Option<usize>) {
+pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb) {
     let id = egui::Id::new(EDIT_ID);
     let out = egui::TextEdit::multiline(&mut e.buf)
         .id(id)
@@ -443,24 +553,51 @@ pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb, pending_cursor: &mut
         .margin(egui::Margin::ZERO)
         .lock_focus(true)
         .show(ui);
-    let set = if e.fresh {
+    let n = e.buf.chars().count();
+    if e.push {
+        e.push = false;
         e.fresh = false;
-        Some(if e.at_end { e.buf.chars().count() } else { 0 })
-    } else {
-        pending_cursor.take()
-    };
-    if let Some(at) = set {
+        let (a, c) = (e.sel.0.min(n), e.sel.1.min(n));
         let mut st = out.state.clone();
-        st.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(at))));
+        st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(a), CCursor::new(c))));
         st.store(ui.ctx(), id);
         out.response.request_focus();
+        ui.ctx().request_repaint();
+    } else if let Some(r) = out.cursor_range {
+        e.sel = (r.secondary.ccursor.index, r.primary.ccursor.index);
     }
     if !out.response.has_focus() {
         out.response.request_focus();
     }
+    if e.slash.is_some() && e.slash_items().is_none() {
+        e.slash = None;
+    }
+    if let (Some(items), Some((_, cur))) = (e.slash_items(), e.slash) {
+        let (at, pivot) = popup_at(ui, out.response.rect, items.len().min(8));
+        egui::Area::new(egui::Id::new("slash")).order(egui::Order::Foreground).pivot(pivot).fixed_pos(at).show(ui.ctx(), |ui| {
+            egui::Frame::new().fill(BG_ALT).stroke((1.0, GREY1)).inner_margin(4.0).show(ui, |ui| {
+                ui.set_min_width(320.0);
+                for (i, &it) in items.iter().enumerate().take(8) {
+                    let sel = i == cur.min(items.len() - 1);
+                    let (name, what) = typing::SLASH[it];
+                    let r = egui::Frame::new().fill(if sel { SELECTION } else { Color32::TRANSPARENT }).inner_margin(egui::Margin::symmetric(6, 2)).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.add(egui::Label::new(RichText::new(format!("/{name:<11}")).size(NOTE_TEXT - 1.0).color(if sel { FG_BRIGHT } else { FG })).selectable(false));
+                            ui.add(egui::Label::new(RichText::new(what).size(NOTE_TEXT - 2.0).color(FG_DIM)).truncate().selectable(false));
+                        });
+                    });
+                    if sel {
+                        ui.painter().rect_filled(Rect::from_min_size(r.response.rect.min, Vec2::new(2.0, r.response.rect.height())), 0.0, RED_CURSOR);
+                    }
+                }
+                ui.label(RichText::new("tab/enter pick · ctrl-n/p move · esc close").size(11.0).color(COMMENT));
+            });
+        });
+    }
 
     // autocomplete: text between the last unclosed [[ and the cursor
-    let caret = out.cursor_range.map(|r| r.primary.ccursor.index).unwrap_or(e.buf.chars().count());
+    let caret = e.sel.1.min(n);
     let chars: Vec<char> = e.buf.chars().collect();
     let upto: String = chars[..caret.min(chars.len())].iter().collect();
     let open = upto.rfind("[[").filter(|&b| !upto[b..].contains("]]") && !upto[b..].contains('\n'));
@@ -480,8 +617,8 @@ pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb, pending_cursor: &mut
     }
     if let Some(a) = &e.ac {
         if !a.items.is_empty() {
-            let at = out.response.rect.left_bottom() + Vec2::new(0.0, 4.0);
-            egui::Area::new(egui::Id::new("ac")).order(egui::Order::Foreground).fixed_pos(at).show(ui.ctx(), |ui| {
+            let (at, pivot) = popup_at(ui, out.response.rect, a.items.len());
+            egui::Area::new(egui::Id::new("ac")).order(egui::Order::Foreground).pivot(pivot).fixed_pos(at).show(ui.ctx(), |ui| {
                 egui::Frame::new().fill(BG_ALT).stroke((1.0, GREY1)).inner_margin(4.0).show(ui, |ui| {
                     ui.set_min_width(320.0);
                     for (i, (_, name)) in a.items.iter().enumerate() {
@@ -499,6 +636,17 @@ pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb, pending_cursor: &mut
                 });
             });
         }
+    }
+}
+
+/// Where a popup of `n` rows goes: under the edit box, or above it when it
+/// wouldn't fit below (so it never covers the line being typed).
+fn popup_at(ui: &egui::Ui, r: Rect, n: usize) -> (Pos2, Align2) {
+    let h = n as f32 * (NOTE_TEXT + 8.0) + 30.0;
+    if r.bottom() + 4.0 + h > ui.ctx().screen_rect().bottom() - STATUS_H {
+        (r.left_top() - Vec2::new(0.0, 4.0), Align2::LEFT_BOTTOM)
+    } else {
+        (r.left_bottom() + Vec2::new(0.0, 4.0), Align2::LEFT_TOP)
     }
 }
 

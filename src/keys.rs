@@ -78,6 +78,13 @@ pub const HELP: &[Group] = &[
             ("tab / s-tab", "save and indent / outdent, keep editing"),
             ("backspace (empty)", "delete the bullet, edit the one above"),
             ("[[", "reference autocomplete · ctrl-n/p or ↑↓ move · tab/enter pick"),
+            ("/ (after a space)", "commands: /h2 /ref /cloze /code /math /mcq /multi ... · tab/enter pick"),
+            ("ctrl-b / ctrl-i / ctrl-`", "bold / italic / code the selection or word (again to undo)"),
+            ("ctrl-m", "wrap the selection or word in $…$"),
+            ("( [ { \" ` $", "type their closer too; the closer steps over · backspace deletes both"),
+            ("== / ===", "become >> / >>> (backspace right after: literal ==)"),
+            (":: ;; >> <> <<", "get a space each side as you type them (backspace: as typed)"),
+            ("(never)", "none of this fires inside `code` or $latex$, or on paste"),
         ],
     },
     Group {
@@ -229,7 +236,7 @@ pub fn hint(ctx: &str) -> &'static str {
     match ctx {
         "tree" => "j/k move · l open · h collapse · </> width · tab notes · ctrl-t find",
         "notes" => "i/a edit · o new · dd del · >> indent · gd ref · / find · ctrl-f cards · ctrl-g graph",
-        "insert" => "esc save · enter new bullet · tab indent · [[ ref",
+        "insert" => "esc save · enter new bullet · tab indent · [[ ref · / commands · ctrl-b bold",
         "pdf" => "f follow link · b back · o pick file · j/k scroll · ]/[ file · a answers · h notes",
         "graph" => "hjkl move · tab walk links · / find · enter open · L local · f module · = fit · esc back",
         "cards" => "h/l column · ]/[ gaps · enter open · gl link · s stage",

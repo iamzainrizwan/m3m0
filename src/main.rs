@@ -18,6 +18,7 @@ mod render;
 mod review;
 mod rich;
 mod theme;
+mod typing;
 
 use config::Config;
 use eframe::egui::{self, Align2, Color32, CursorIcon, FontFamily, FontId, Pos2, Rect, RichText, Sense, Vec2};
@@ -181,8 +182,6 @@ struct App {
     jumps: Vec<(String, usize)>,
     changes: edit::Changes,
     editing: Option<editor::Editing>,
-    /// cursor position to set in the edit box next frame (after autocomplete)
-    pending_cursor: Option<usize>,
     bridge: bridge::Bridge,
     committing: Option<mpsc::Receiver<(commit::Outcome, Vec<edit::Op>)>>,
     pdfs: pdf::Pdfs,
@@ -315,7 +314,6 @@ impl App {
             jumps: vec![],
             changes: edit::Changes::default(),
             editing: None,
-            pending_cursor: None,
             bridge,
             committing: None,
             pdfs,
@@ -1423,7 +1421,7 @@ impl eframe::App for App {
                 ks.clear(); // previews: only replayed keys
             }
             // M3M0_KEYS replays keys after boot, for previews ("~b" = ctrl-b,
-            // "\n" = enter, "\x1b" = esc, "|" = wait ~0.6 s for the UI to settle)
+            // "\n" = enter, "\x1b" = esc, "\x08" = backspace, "|" = wait ~0.6 s for the UI to settle)
             if let (Ok(s), false) = (std::env::var("M3M0_KEYS"), self.replayed) {
                 let now = ctx.input(|i| i.time);
                 if self.data.as_ref().is_some_and(|d| d.is_ok()) && now >= self.replay_at {
@@ -1435,6 +1433,7 @@ impl eframe::App for App {
                                 '~' => K::Ctrl(it.next().unwrap_or(' ')),
                                 '\n' => K::Enter,
                                 '\t' => K::Tab,
+                                '\u{8}' => K::Back,
                                 '\u{1b}' => K::Esc,
                                 c => K::Ch(c),
                             });
@@ -1989,7 +1988,6 @@ impl App {
                 self.note_cur = self.note_cur.min(rows.len().saturating_sub(1));
                 let mut clicked_ref: Option<String> = None;
                 let mut editing = self.editing.take();
-                let mut pending_cursor = self.pending_cursor.take();
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     let width = (ui.available_width() - 12.0).min(MEASURE);
                     let pad = ((ui.available_width() - width) / 2.0).max(0.0);
@@ -2016,7 +2014,7 @@ impl App {
                                         if heading.is_none() {
                                             editor::edit_bullet(ui);
                                         }
-                                        editor::edit_ui(ui, e, &d.kb, &mut pending_cursor);
+                                        editor::edit_ui(ui, e, &d.kb);
                                         return;
                                     }
                                     let line = d.kb.line_of(id);
@@ -2064,7 +2062,6 @@ impl App {
                 });
                 self.scroll_notes = false;
                 self.editing = editing;
-                self.pending_cursor = pending_cursor;
                 if let Some(r) = clicked_ref {
                     self.goto(d, &r);
                 }
