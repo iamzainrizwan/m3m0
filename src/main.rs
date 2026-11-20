@@ -128,6 +128,9 @@ enum Overlay {
     Link(cards::LinkPick),
     /// list of the week's PDFs (o in the pdf panel, :pdf)
     Pdfs { cur: usize },
+    /// gb: rems referencing the cursor bullet, then the page
+    /// (id, text, page name, references the page rather than the bullet)
+    Back { items: Vec<(String, String, String, bool)>, cur: usize, what: String },
 }
 
 /// Actions that need the loaded data, queued during key handling (when the
@@ -207,6 +210,10 @@ struct App {
     last_change: Option<editor::Repeat>,
     /// the bullet being typed came from o (false) / O (true), for `.`
     insert_from: Option<bool>,
+    /// due cards per week for the sidebar, and when they were counted
+    due: (f64, std::collections::HashMap<String, usize>),
+    /// cards graded this session (the snapshot doesn't know yet)
+    graded: HashSet<String>,
 }
 
 fn load(db: Option<PathBuf>) -> Result<Loaded, String> {
@@ -342,6 +349,8 @@ impl App {
             visual: None,
             last_change: None,
             insert_from: None,
+            due: (f64::NEG_INFINITY, Default::default()),
+            graded: HashSet::new(),
         }
     }
 
@@ -545,6 +554,16 @@ impl App {
             return;
         }
         if self.cards.is_some() && self.focus == Focus::Notes && self.cards_key(d, &prefix, k, n) {
+            return;
+        }
+        // gb: what links here · ga: ask claude about this bullet
+        if prefix == "g" && matches!(k, K::Ch('b') | K::Ch('a')) && self.focus == Focus::Notes && self.cards.is_none() && !self.view_graph {
+            let cur = nrows.get(self.note_cur).map(|r| r.0.clone());
+            if matches!(k, K::Ch('b')) {
+                self.open_backlinks(d, cur.as_deref());
+            } else if let Some(id) = cur {
+                self.ask_about(d, &id);
+            }
             return;
         }
         // gl on a bullet in the notes: link it to a Claude card
@@ -1137,8 +1156,70 @@ impl App {
                 K::Esc | K::Ch('q') | K::Ch('o') => self.overlay = Overlay::None,
                 _ => {}
             },
+            Overlay::Back { items, cur, .. } => match k {
+                K::Ch('j') | K::Down | K::Ctrl('n') => *cur = (*cur + 1).min(items.len().saturating_sub(1)),
+                K::Ch('k') | K::Up | K::Ctrl('p') => *cur = cur.saturating_sub(1),
+                K::Ch('g') => *cur = 0,
+                K::Ch('G') => *cur = items.len().saturating_sub(1),
+                K::Enter | K::Ch('l') => {
+                    if let Some((id, ..)) = items.get(*cur).cloned() {
+                        self.overlay = Overlay::None;
+                        self.deferred.push(Deferred::Goto(id));
+                    }
+                }
+                K::Esc | K::Ch('q') => self.overlay = Overlay::None,
+                _ => {}
+            },
             Overlay::None => {}
         }
+    }
+
+    /// gb: every rem whose text references the cursor bullet, then the page.
+    fn open_backlinks(&mut self, d: &Loaded, cur: Option<&str>) {
+        let Some(page) = self.week.clone() else { return };
+        let targets: Vec<(String, bool)> = cur.map(|c| (c.to_owned(), false)).into_iter().chain([(page.clone(), true)]).collect();
+        let needles: Vec<(String, bool)> = targets.iter().map(|(t, p)| (format!("\"_id\":\"{t}\""), *p)).collect();
+        let name = |id: &str| d.kb.name(id);
+        let mut items: Vec<(String, String, String, bool)> = vec![];
+        for (id, doc) in &d.kb.q {
+            if d.kb.is_hidden(id) {
+                continue;
+            }
+            let text = format!("{}{}", doc.get("key").map(|v| v.to_string()).unwrap_or_default(), doc.get("value").map(|v| v.to_string()).unwrap_or_default());
+            for (n, is_page) in &needles {
+                if text.contains(n.as_str()) && !items.iter().any(|x| &x.0 == id) {
+                    let l = d.kb.line_of(id);
+                    let t = rich::readable(&l.front, &name);
+                    let where_ = page_of(d, id).map(|p| d.kb.name(&p)).unwrap_or_default();
+                    items.push((id.clone(), t, where_, *is_page));
+                }
+            }
+        }
+        items.sort_by(|a, b| (a.3, &a.2, &a.1).cmp(&(b.3, &b.2, &b.1)));
+        let what = cur.map(|c| d.kb.name(c)).unwrap_or_else(|| d.kb.name(&page));
+        if items.is_empty() {
+            self.msg = Some("nothing links to this bullet or page".into());
+            return;
+        }
+        self.overlay = Overlay::Back { items, cur: 0, what };
+    }
+
+    /// ga: open the chat with the cursor bullet and its children quoted.
+    fn ask_about(&mut self, d: &Loaded, id: &str) {
+        let name = |r: &str| d.kb.name(r);
+        // deck syntax, so claude sees the card markers and the latex
+        let text = |r: &str| rich::line_to_text(&d.kb.line_of(r), &name, &mut rich::Side::default()).replace('\n', " ");
+        let rows = note_rows(&d.kb, id, &HashSet::new());
+        let mut q = format!("> {}\n", text(id));
+        for (r, depth) in rows {
+            q.push_str(&format!("> {}- {}\n", "  ".repeat(depth), text(&r)));
+        }
+        q.push('\n');
+        self.chat.input = q;
+        self.chat.focus_input = true;
+        self.cfg.chat_open = true;
+        self.cfg.pdf_open = false;
+        self.focus = Focus::Chat;
     }
 
     /// Stage the inverse of a past commit (newest op first) for review with :w.
@@ -1697,7 +1778,40 @@ impl App {
         });
     }
 
+    /// Due cards per week (sidebar), recounted every 30 s; cards graded in this
+    /// session don't count (the snapshot still has their old due date).
+    fn count_due(&mut self, ctx: &egui::Context, d: &Loaded) {
+        let t = ctx.input(|i| i.time);
+        if t - self.due.0 < 30.0 {
+            return;
+        }
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|t| t.as_millis() as f64).unwrap_or(0.0);
+        let mut week_of: std::collections::HashMap<String, String> = Default::default();
+        for m in &d.mods {
+            for w in d.kb.children(Some(m)) {
+                if d.kb.name(w).starts_with("Week") {
+                    for r in edit::subtree(&d.kb, w) {
+                        week_of.insert(r, w.clone());
+                    }
+                }
+            }
+        }
+        let mut due: std::collections::HashMap<String, usize> = Default::default();
+        for c in &d.kb.card_docs {
+            let (Some(rem), Some(id)) = (c.get("rId").and_then(|v| v.as_str()), c.get("_id").and_then(|v| v.as_str())) else { continue };
+            if c.get("n").and_then(|v| v.as_f64()).unwrap_or(0.0) > now || self.graded.contains(id) {
+                continue;
+            }
+            if let Some(w) = week_of.get(rem) {
+                *due.entry(w.clone()).or_default() += 1;
+            }
+        }
+        self.due = (t, due);
+        ctx.request_repaint_after(std::time::Duration::from_secs(31));
+    }
+
     fn sidebar(&mut self, ctx: &egui::Context, d: &Loaded) {
+        self.count_due(ctx, d);
         let rows = tree_rows(d, &self.open_mods);
         self.tree_cur = self.tree_cur.min(rows.len().saturating_sub(1));
         let focused = self.focus == Focus::Tree;
@@ -1718,9 +1832,23 @@ impl App {
                             let col = if active { RED_BRIGHT } else if sel && focused { FG } else { FG_DIM };
                             (RichText::new(d.kb.name(id)).size(TREE_TEXT - 0.5).color(col), 18.0)
                         };
+                        let due = if *is_mod { 0 } else { self.due.1.get(id).copied().unwrap_or(0) };
                         let resp = row(ui, ("t", id), sel, focused, indent, |ui| {
-                            ui.add(egui::Label::new(text).truncate().selectable(false));
+                            if due > 0 {
+                                // leave room for the due count on the right
+                                let w = (ui.available_width() - 34.0).max(20.0);
+                                ui.allocate_ui_with_layout(Vec2::new(w, 18.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.set_width(w);
+                                    ui.add(egui::Label::new(text).truncate().selectable(false));
+                                });
+                            } else {
+                                ui.add(egui::Label::new(text).truncate().selectable(false));
+                            }
                         });
+                        if due > 0 {
+                            let n = if due > 999 { "999+".to_owned() } else { due.to_string() };
+                            ui.painter().text(resp.rect.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, n, FontId::monospace(TREE_TEXT - 3.0), if active { RED_BRIGHT } else { RED });
+                        }
                         if sel && self.scroll_tree {
                             resp.scroll_to_me(None);
                         }
@@ -2014,6 +2142,7 @@ impl App {
                             ui.spacing_mut().item_spacing.y = 0.0;
                             ui.label(RichText::new(d.kb.name(&w)).size(24.0).color(FG_BRIGHT).family(bold()));
                             ui.add_space(14.0);
+                            let mut rects: Vec<Rect> = Vec::with_capacity(rows.len());
                             for (i, (id, depth)) in rows.iter().enumerate() {
                                 let sel = i == self.note_cur;
                                 let kids = !d.kb.children(Some(id)).is_empty();
@@ -2060,6 +2189,7 @@ impl App {
                                         clicked_ref = Some(rid.clone());
                                     }
                                 }
+                                rects.push(resp.rect);
                                 if sel && self.scroll_notes {
                                     resp.scroll_to_me(None);
                                 }
@@ -2073,6 +2203,7 @@ impl App {
                                     }
                                 }
                             }
+                            indent_guides(ui, &rows, &rects, self.note_cur);
                             ui.add_space(ui.ctx().screen_rect().height() * 0.4);
                         });
                     });
@@ -2220,6 +2351,36 @@ impl App {
                     });
                     ui.add_space(8.0);
                     ui.label(RichText::new(format!("h/l section ({}/{}) · 1-9 jump · j/k scroll · esc close · typing a prefix (g z d > <) shows what can follow", tab + 1, keys::HELP.len())).color(COMMENT).size(12.0));
+                });
+            }
+            Overlay::Back { items, cur, what } => {
+                let cur = *cur;
+                let sections = 1 + items.iter().any(|x| x.3) as usize * (items.iter().any(|x| !x.3) as usize);
+                let h = (screen.height() - 80.0).min(96.0 + items.len() as f32 * 26.0 + sections as f32 * 30.0);
+                let title = format!("linking here · {}", rich::readable_str(what));
+                modal(ctx, &title, screen, Vec2::new(860.0, h), |ui| {
+                    egui::ScrollArea::vertical().max_height(h - 100.0).show(ui, |ui| {
+                        ui.spacing_mut().item_spacing.y = 0.0;
+                        for (i, (_, text, page, is_page)) in items.iter().enumerate() {
+                            if i == 0 || items[i - 1].3 != *is_page {
+                                ui.add_space(if i == 0 { 0.0 } else { 10.0 });
+                                ui.label(RichText::new(if *is_page { "this page" } else { "this bullet" }).color(RED).family(bold()).size(13.0));
+                                ui.add_space(3.0);
+                            }
+                            let r = row(ui, ("back", i), i == cur, true, 0.0, |ui| {
+                                ui.allocate_ui_with_layout(Vec2::new(560.0, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                    ui.set_width(560.0);
+                                    ui.add(egui::Label::new(RichText::new(text).color(if i == cur { FG_BRIGHT } else { FG }).size(13.5)).truncate());
+                                });
+                                ui.add(egui::Label::new(RichText::new(page).color(COMMENT).size(11.5)).truncate());
+                            });
+                            if i == cur {
+                                r.scroll_to_me(None);
+                            }
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("j/k move · enter go there (ctrl-o back) · esc close").color(COMMENT).size(12.0));
                 });
             }
             Overlay::Pdfs { cur } => {
@@ -2401,6 +2562,39 @@ impl App {
                 });
             }
             _ => {}
+        }
+    }
+}
+
+/// Thin lines from each open parent down to its last child, one per level;
+/// the cursor bullet's own level in red.
+fn indent_guides(ui: &egui::Ui, rows: &[(String, usize)], rects: &[Rect], cur: usize) {
+    let dot = ui.fonts(|f| f.glyph_width(&FontId::proportional(NOTE_TEXT - 2.0), '•'));
+    let line_h = ui.fonts(|f| f.row_height(&FontId::proportional(NOTE_TEXT)));
+    let sx = ui.spacing().item_spacing.x;
+    let cur_parent = rows.get(cur).filter(|r| r.1 > 0).and_then(|(_, cd)| rows[..cur].iter().rposition(|r| r.1 < *cd));
+    let p = ui.painter();
+    for (i, (_, depth)) in rows.iter().enumerate() {
+        if rows.get(i + 1).is_none_or(|r| r.1 <= *depth) {
+            continue;
+        }
+        // last direct child: the last row one level down before the subtree ends
+        let mut last = i + 1;
+        for (j, r) in rows.iter().enumerate().skip(i + 1) {
+            if r.1 <= *depth {
+                break;
+            }
+            if r.1 == depth + 1 {
+                last = j;
+            }
+        }
+        let (Some(a), Some(b)) = (rects.get(i), rects.get(last)) else { continue };
+        let x = (a.left() + 8.0 + *depth as f32 * 22.0 + sx + dot / 2.0).round() + 0.5;
+        let top = a.top() + 3.0 + line_h + 2.0;
+        let bottom = b.top() + 3.0 + line_h / 2.0;
+        if bottom > top {
+            let col = if cur_parent == Some(i) { RED } else { GREY0 };
+            p.line_segment([Pos2::new(x, top), Pos2::new(x, bottom)], (1.0, col));
         }
     }
 }
@@ -2840,6 +3034,18 @@ fn answer(ui: &mut egui::Ui, kb: &Kb, math: &mut math::Math, text: &str) {
 }
 
 /// "1 change", "3 changes"
+/// The page (module week) a rem is on: the ancestor whose parent is a module.
+fn page_of(d: &Loaded, id: &str) -> Option<String> {
+    let mut cur = id.to_owned();
+    while let Some(p) = d.kb.q.get(&cur).and_then(|x| x.get("parent")).and_then(|p| p.as_str()).map(str::to_owned) {
+        if d.mods.contains(&p) {
+            return Some(cur);
+        }
+        cur = p;
+    }
+    None
+}
+
 fn plural(n: usize, word: &str) -> String {
     if n == 1 { word.to_owned() } else { format!("{word}s") }
 }

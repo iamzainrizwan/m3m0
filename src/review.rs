@@ -84,6 +84,7 @@ impl App {
                     let _ = tx.send((card, res));
                 });
                 r.inflight.push(rx);
+                self.graded.insert(it.card.clone());
                 r.graded += 1;
                 r.i += 1;
                 r.revealed = false;
