@@ -278,6 +278,17 @@ impl App {
             }
             ("", K::Ch('>')) => self.pending.push('>'),
             ("", K::Ch('<')) => self.pending.push('<'),
+            ("", K::Alt('l' | 'h')) => {
+                if let Some(c) = cur {
+                    for _ in 0..n {
+                        if matches!(k, K::Alt('l')) {
+                            self.indent(d, &c);
+                        } else {
+                            self.outdent(d, &c);
+                        }
+                    }
+                }
+            }
             ("", K::Alt('j')) | ("", K::Alt('k')) => {
                 if let Some(c) = cur {
                     let by = if matches!(k, K::Alt('j')) { n as isize } else { -(n as isize) };
@@ -405,6 +416,23 @@ impl App {
     }
 }
 
+/// The bullet in front of the edit box: same glyph, size and width as
+/// render::line's, red, on the edit text's baseline.
+pub fn edit_bullet(ui: &mut egui::Ui) {
+    let baseline = |t: RichText| {
+        let g = egui::WidgetText::from(t).into_galley(ui, Some(egui::TextWrapMode::Extend), f32::INFINITY, egui::FontSelection::Default);
+        let b = g.rows.first().and_then(|r| r.glyphs.first()).map(|g| g.pos.y).unwrap_or(0.0);
+        (g, b)
+    };
+    let (dot, db) = baseline(RichText::new("•  ").size(NOTE_TEXT - 2.0).color(RED));
+    let (_, tb) = baseline(RichText::new("x").font(FontId::monospace(NOTE_TEXT)));
+    let h = ui.fonts(|f| f.row_height(&FontId::monospace(NOTE_TEXT)));
+    let (r, _) = ui.allocate_exact_size(Vec2::new(dot.size().x, h), Sense::hover());
+    ui.painter().galley(Pos2::new(r.min.x, r.min.y + tb - db), dot, RED);
+    // render::line packs the bullet and text with no gap
+    ui.add_space(-ui.spacing().item_spacing.x);
+}
+
 /// The text box for the bullet being edited, plus the [[ autocomplete popup.
 pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb, pending_cursor: &mut Option<usize>) {
     let id = egui::Id::new(EDIT_ID);
@@ -415,6 +443,7 @@ pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb, pending_cursor: &mut
         .desired_rows(1)
         .desired_width(f32::INFINITY)
         .frame(false)
+        .margin(egui::Margin::ZERO)
         .lock_focus(true)
         .show(ui);
     let set = if e.fresh {

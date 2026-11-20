@@ -1284,6 +1284,14 @@ impl App {
                 let db = kb::resolve_db(self.cfg.db.as_deref());
                 self.reload(ctx, db);
             }
+            (Some("scroll"), arg) => match arg.map(str::parse::<f32>) {
+                Some(Ok(v)) if v > 0.0 => {
+                    self.cfg.scroll = v.min(10.0);
+                    self.msg = Some(format!("scroll speed {}", self.cfg.scroll));
+                }
+                None => self.msg = Some(format!("scroll speed {} (:scroll 1.5 to change)", self.cfg.scroll)),
+                _ => self.msg = Some("scroll: give a number like 1.5".into()),
+            },
             (Some("zoom"), Some(z)) => match z.trim_end_matches('%').parse::<f32>() {
                 Ok(z) => {
                     let z = if z > 4.0 { z / 100.0 } else { z };
@@ -1334,6 +1342,18 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// egui turns touchpad pixel deltas into points by dividing by the display
+    /// scale (GNOME 1.5x) times our zoom, so scrolling crawls: scale point
+    /// deltas back up (and by the `:scroll` setting).
+    fn raw_input_hook(&mut self, ctx: &egui::Context, raw: &mut egui::RawInput) {
+        let f = ctx.pixels_per_point() * self.cfg.scroll.clamp(0.1, 10.0);
+        for e in &mut raw.events {
+            if let egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Point, delta, .. } = e {
+                *delta *= f;
+            }
+        }
+    }
+
     fn clear_color(&self, _: &egui::Visuals) -> [f32; 4] {
         [0.0, 0.0, 0.0, 1.0]
     }
@@ -1956,7 +1976,10 @@ impl App {
                                 let mut refs = vec![];
                                 let resp = row(ui, ("n", id), sel, focused, *depth as f32 * 22.0, |ui| {
                                     if let Some(e) = editing.as_mut().filter(|e| &e.id == id) {
-                                        ui.label(RichText::new("\u{f040} ").size(NOTE_TEXT - 2.0).color(RED));
+                                        // keep the bullet (red) so the line doesn't jump; headings have none
+                                        if heading.is_none() {
+                                            editor::edit_bullet(ui);
+                                        }
                                         editor::edit_ui(ui, e, &d.kb, &mut pending_cursor);
                                         return;
                                     }

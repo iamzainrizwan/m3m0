@@ -16,11 +16,13 @@ pub struct Config {
     pub chat_w: f32,
     /// None = auto-detect (largest ~/remnote/*/remnote.db).
     pub db: Option<PathBuf>,
+    /// wheel / touchpad speed on top of undoing egui's divide by the display scale
+    pub scroll: f32,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { zoom: None, sidebar_w: 240.0, sidebar_open: true, pdf_open: false, pdf_w: 640.0, chat_open: false, chat_w: 560.0, db: None }
+        Config { zoom: None, sidebar_w: 240.0, sidebar_open: true, pdf_open: false, pdf_w: 640.0, chat_open: false, chat_w: 560.0, db: None, scroll: 1.0 }
     }
 }
 
