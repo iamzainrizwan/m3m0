@@ -1473,6 +1473,10 @@ impl App {
                 None => self.msg = Some(format!("scroll speed {} (:scroll 1.5 to change)", self.cfg.scroll)),
                 _ => self.msg = Some("scroll: give a number like 1.5".into()),
             },
+            (Some("rnu" | "relnum" | "nu"), _) => {
+                self.cfg.relnum = !self.cfg.relnum;
+                self.msg = Some(format!("relative numbers {}", if self.cfg.relnum { "on" } else { "off" }));
+            }
             (Some("zoom"), Some(z)) => match z.trim_end_matches('%').parse::<f32>() {
                 Ok(z) => {
                     let z = if z > 4.0 { z / 100.0 } else { z };
@@ -1928,7 +1932,7 @@ impl App {
                         });
                         if due > 0 {
                             let n = if due > 999 { "999+".to_owned() } else { due.to_string() };
-                            ui.painter().text(resp.rect.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, n, FontId::monospace(TREE_TEXT - 3.0), if active { RED_BRIGHT } else { RED });
+                            ui.painter().text(resp.rect.right_center() - Vec2::new(8.0, 0.0), Align2::RIGHT_CENTER, n, FontId::monospace(TREE_TEXT - 3.0), if active { RED_BRIGHT } else { FG_DIM });
                         }
                         if sel && self.scroll_tree {
                             resp.scroll_to_me(None);
@@ -2287,6 +2291,9 @@ impl App {
                                 }
                             }
                             indent_guides(ui, &rows, &rects, self.note_cur);
+                            if self.cfg.relnum {
+                                gutter_numbers(ui, &rects, self.note_cur, focused);
+                            }
                             ui.add_space(ui.ctx().screen_rect().height() * 0.4);
                         });
                     });
@@ -2406,20 +2413,46 @@ impl App {
                 let size = Vec2::new((screen.width() - 80.0).min(900.0), (screen.height() - 80.0).min(160.0 + most as f32 * 30.0 + 90.0).max(360.0));
                 modal(ctx, "keys", screen, size, |ui| {
                     // section tabs
-                    ui.horizontal_wrapped(|ui| {
-                        ui.spacing_mut().item_spacing = Vec2::new(4.0, 6.0);
-                        for (i, s) in keys::HELP.iter().enumerate() {
-                            let sel = i == tab;
-                            let short = s.title.split(" (").next().unwrap_or(s.title); // "graph (ctrl-g)" -> "graph"
-                            let t = RichText::new(format!(" {short} ")).size(12.5).color(if sel { BG } else { FG_DIM });
-                            let t = if sel { t.background_color(RED) } else { t.background_color(GREY0) };
-                            ui.label(t);
+                    // section tabs, packed into rows by measured width
+                    let f = FontId::monospace(12.5);
+                    let tabs: Vec<(usize, String, f32)> = keys::HELP
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| {
+                            let short = s.title.split(" (").next().unwrap_or(s.title).to_owned(); // "graph (ctrl-g)" -> "graph"
+                            let w = ui.fonts(|g| g.layout_no_wrap(short.clone(), f.clone(), FG).size().x) + 14.0;
+                            (i, short, w)
+                        })
+                        .collect();
+                    let avail = ui.available_width();
+                    let mut rows: Vec<Vec<&(usize, String, f32)>> = vec![vec![]];
+                    let mut x = 0.0;
+                    for t in &tabs {
+                        if x + t.2 > avail && !rows.last().unwrap().is_empty() {
+                            rows.push(vec![]);
+                            x = 0.0;
                         }
-                    });
+                        x += t.2 + 4.0;
+                        rows.last_mut().unwrap().push(t);
+                    }
+                    ui.spacing_mut().item_spacing.y = 4.0;
+                    for r in rows {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            for (i, short, w) in r {
+                                let sel = *i == tab;
+                                let (rect, _) = ui.allocate_exact_size(Vec2::new(*w, 22.0), Sense::hover());
+                                ui.painter().rect_filled(rect, 0.0, if sel { RED } else { GREY0 });
+                                ui.painter().text(rect.center(), Align2::CENTER_CENTER, short, f.clone(), if sel { BG } else { FG_DIM });
+                            }
+                        });
+                    }
                     ui.add_space(14.0);
                     ui.label(RichText::new(g.title).color(RED_BRIGHT).family(bold()).size(17.0));
                     ui.add_space(8.0);
-                    let keyw = 250.0;
+                    // key column as wide as this section's longest key
+                    let longest = g.keys.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(8) as f32;
+                    let keyw = (longest * 15.0 * 0.6 + 28.0).clamp(110.0, 300.0);
                     egui::ScrollArea::vertical().max_height(size.y - 170.0).vertical_scroll_offset(scroll as f32 * 30.0).show(ui, |ui| {
                         for (k, what) in g.keys {
                             ui.horizontal_top(|ui| {
@@ -2679,6 +2712,18 @@ fn indent_guides(ui: &egui::Ui, rows: &[(String, usize)], rects: &[Rect], cur: u
             let col = if cur_parent == Some(i) { RED } else { GREY0 };
             p.line_segment([Pos2::new(x, top), Pos2::new(x, bottom)], (1.0, col));
         }
+    }
+}
+
+/// vim-style relative numbers left of each bullet: distance from the cursor
+/// (what a count like 5j needs), the cursor row's own number in red.
+fn gutter_numbers(ui: &egui::Ui, rects: &[Rect], cur: usize, focused: bool) {
+    let f = FontId::monospace(11.5);
+    let line_h = ui.fonts(|g| g.row_height(&FontId::proportional(NOTE_TEXT)));
+    let p = ui.painter();
+    for (i, r) in rects.iter().enumerate() {
+        let (t, col) = if i == cur { ((i + 1).to_string(), if focused { RED_BRIGHT } else { FG_DIM }) } else { (i.abs_diff(cur).to_string(), GREY1) };
+        p.text(Pos2::new(r.left() - 8.0, r.top() + 3.0 + line_h / 2.0), Align2::RIGHT_CENTER, t, f.clone(), col);
     }
 }
 

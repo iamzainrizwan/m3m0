@@ -221,6 +221,7 @@ pub const HELP: &[Group] = &[
             (":db", "pick which RemNote database to read"),
             (":reload / :e", "re-read RemNote (refuses with staged changes)"),
             (":zoom 130", "set zoom (also ctrl +/-)"),
+            (":rnu", "relative bullet numbers in the gutter on / off (saved)"),
             (":scroll 1.5", "wheel / touchpad scroll speed (saved; 1 = follows your fingers)"),
             (":find", "same as ctrl-t"),
             (":pdf", "open the files pane and list this week's files"),

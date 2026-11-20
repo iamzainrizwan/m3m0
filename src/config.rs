@@ -18,11 +18,13 @@ pub struct Config {
     pub db: Option<PathBuf>,
     /// wheel / touchpad speed on top of undoing egui's divide by the display scale
     pub scroll: f32,
+    /// relative bullet numbers in the notes gutter (vim's relativenumber)
+    pub relnum: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
-        Config { zoom: None, sidebar_w: 240.0, sidebar_open: true, pdf_open: false, pdf_w: 640.0, chat_open: false, chat_w: 560.0, db: None, scroll: 1.0 }
+        Config { zoom: None, sidebar_w: 240.0, sidebar_open: true, pdf_open: false, pdf_w: 640.0, chat_open: false, chat_w: 560.0, db: None, scroll: 1.0, relnum: true }
     }
 }
 
