@@ -238,7 +238,8 @@ impl Bridge {
     pub fn call(&self, op: &str, args: Value) -> Result<Value, String> {
         let (rtx, rrx) = channel();
         self.tx.send((op.to_owned(), args, rtx)).map_err(|_| "bridge worker stopped".to_string())?;
-        rrx.recv_timeout(Duration::from_secs(60)).map_err(|_| format!("{op}: no reply from RemNote within 60 s"))?
+        // longer than the socket read timeout (90 s): the worker always answers first
+        rrx.recv_timeout(Duration::from_secs(120)).map_err(|_| format!("{op}: no reply from RemNote within 2 min"))?
     }
 
     /// Wait until the plugin is connected, up to `secs`.
@@ -256,7 +257,8 @@ impl Bridge {
 
 fn handshake(s: TcpStream) -> Result<Conn, String> {
     s.set_nonblocking(false).map_err(|e| e.to_string())?;
-    s.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    // a slow op (aliases, RemNote waking) isn't a dead link; callers wait 120 s
+    s.set_read_timeout(Some(Duration::from_secs(90))).ok();
     let mut ws = tungstenite::accept(s).map_err(|e| e.to_string())?;
     let hello = read_json(&mut ws)?;
     if hello.get("hello").and_then(Value::as_str) != Some("m3m0-bridge") {

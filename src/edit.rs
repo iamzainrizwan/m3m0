@@ -76,6 +76,8 @@ pub struct Changes {
     redo_steps: Vec<usize>,
     group: usize,
     group_fresh: bool,
+    /// bumped on every change to `ops`, so savers can tell cheaply
+    pub version: u64,
 }
 
 impl Changes {
@@ -97,6 +99,7 @@ impl Changes {
     }
 
     pub fn apply(&mut self, kb: &mut Kb, op: Op) {
+        self.version += 1;
         apply(kb, &op);
         self.ops.push(op);
         self.clear_redo();
@@ -113,22 +116,38 @@ impl Changes {
         self.redo_steps.clear();
     }
 
-    /// Take back exactly the last op, leaving no redo (a blank bullet dropped,
-    /// a fresh bullet re-staged elsewhere).
-    pub fn drop_last(&mut self, kb: &mut Kb) {
-        let Some(op) = self.ops.pop() else { return };
+    /// Take back the Create of `id` (a blank bullet dropped, a fresh bullet
+    /// re-staged elsewhere), leaving no redo. Usually it's the last op; if
+    /// later ops touch only other rems (numbering siblings), it's cut out of
+    /// the middle. Returns false if that isn't safe.
+    pub fn drop_create(&mut self, kb: &mut Kb, id: &str) -> bool {
+        let Some(i) = self.ops.iter().rposition(|o| matches!(o, Op::Create { id: c, .. } if c == id)) else { return false };
+        let later_uses = self.ops[i + 1..].iter().any(|o| serde_json::to_string(o).is_ok_and(|s| s.contains(&format!("\"{id}\""))));
+        if later_uses {
+            return false;
+        }
+        let op = self.ops.remove(i);
+        self.version += 1;
         apply(kb, &inverse(&op));
-        if let Some(n) = self.steps.last_mut() {
-            *n -= 1;
-            if *n == 0 {
-                self.steps.pop();
+        // the undo step holding op i loses one op
+        let mut acc = 0;
+        for k in 0..self.steps.len() {
+            acc += self.steps[k];
+            if i < acc {
+                self.steps[k] -= 1;
+                if self.steps[k] == 0 {
+                    self.steps.remove(k);
+                }
+                break;
             }
         }
         self.clear_redo();
+        true
     }
 
     /// After ops were replaced from outside (commit, restore): one step each.
     pub fn reset_steps(&mut self) {
+        self.version += 1;
         self.steps = vec![1; self.ops.len()];
         self.clear_redo();
     }
@@ -138,6 +157,7 @@ impl Changes {
         if n == 0 {
             return None;
         }
+        self.version += 1;
         let mut focus = None;
         for _ in 0..n {
             let op = self.ops.pop()?;
@@ -154,6 +174,7 @@ impl Changes {
         if n == 0 {
             return None;
         }
+        self.version += 1;
         let mut focus = None;
         for _ in 0..n {
             let op = self.redo.pop()?;

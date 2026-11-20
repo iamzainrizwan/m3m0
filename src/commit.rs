@@ -132,8 +132,9 @@ fn send(bridge: &Bridge, op: &str, mut f: Value, cache: &mut HashMap<(String, St
     bridge.call(op, f)
 }
 
-/// Run the ops. `children` gives a rem's children (for marking >>> items).
-pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>) -> Outcome {
+/// Run the ops. `children` gives the children of rems turning into (or out of)
+/// >>> cards; `items` are rems created or moved under a >>> card.
+pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>, items: &std::collections::HashSet<String>) -> Outcome {
     let mut idmap: HashMap<String, String> = HashMap::new();
     let mut aliases = HashMap::new();
     let real = |m: &HashMap<String, String>, id: &str| m.get(id).cloned().unwrap_or_else(|| id.to_owned());
@@ -143,6 +144,13 @@ pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>)
                 Op::Create { id, parent, pos, line } if line.kind == "__restore__" => {
                     // re-create a deleted subtree (revert of a delete): root first
                     let docs: Vec<(String, Value)> = serde_json::from_value(line.front.clone()).unwrap_or_default();
+                    // a failure part way removes what this op made, so a retry doesn't duplicate
+                    let mut made: Vec<String> = vec![];
+                    let undo = |made: &[String]| {
+                        for m in made.iter().rev() {
+                            let _ = bridge.call("delete", json!({ "rem": m }));
+                        }
+                    };
                     for (k, (old, d)) in docs.iter().enumerate() {
                         let l = line_of_doc(d);
                         let mut f = fields(&l, &idmap);
@@ -157,8 +165,15 @@ pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>)
                         if card_item {
                             f["cardItem"] = json!(true);
                         }
-                        let res = send(bridge, "create", f, &mut aliases)?;
-                        let new = res["id"].as_str().ok_or("create returned no id")?.to_owned();
+                        let res = match send(bridge, "create", f, &mut aliases).and_then(|r| r["id"].as_str().map(str::to_owned).ok_or("create returned no id".to_string())) {
+                            Ok(r) => r,
+                            Err(e) => {
+                                undo(&made);
+                                return Err(e);
+                            }
+                        };
+                        made.push(res.clone());
+                        let new = res;
                         idmap.insert(old.clone(), new);
                         if k == 0 {
                             idmap.insert(id.clone(), idmap[old].clone());
@@ -169,6 +184,9 @@ pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>)
                     let mut f = fields(line, &idmap);
                     f["parent"] = json!(real(&idmap, parent));
                     f["position"] = json!(pos);
+                    if items.contains(id) {
+                        f["cardItem"] = json!(true);
+                    }
                     let res = send(bridge, "create", f, &mut aliases)?;
                     let new = res["id"].as_str().ok_or("create returned no id")?.to_owned();
                     idmap.insert(id.clone(), new);
@@ -181,9 +199,14 @@ pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>)
                     }
                     f["rem"] = json!(real(&idmap, id));
                     send(bridge, "update", f, &mut aliases)?;
-                    if after.kind == "multiline" && before.kind != "multiline" {
+                    let (was, is) = (before.kind == "multiline", after.kind == "multiline");
+                    if was != is {
                         for c in children.get(id).into_iter().flatten() {
-                            bridge.call("update", json!({ "rem": real(&idmap, c), "cardItem": true }))?;
+                            // new children not sent yet get tagged at their own create
+                            if c.starts_with("tmp-") && !idmap.contains_key(c) {
+                                continue;
+                            }
+                            bridge.call("update", json!({ "rem": real(&idmap, c), "cardItem": is }))?;
                         }
                     }
                 }
@@ -191,7 +214,11 @@ pub fn run(bridge: &Bridge, ops: &[Op], children: &HashMap<String, Vec<String>>)
                     bridge.call("delete", json!({ "rem": real(&idmap, id) }))?;
                 }
                 Op::Move { id, to, .. } => {
-                    bridge.call("update", json!({ "rem": real(&idmap, id), "parent": real(&idmap, &to.0), "position": to.1 }))?;
+                    let mut f = json!({ "rem": real(&idmap, id), "parent": real(&idmap, &to.0), "position": to.1 });
+                    if items.contains(id) {
+                        f["cardItem"] = json!(true);
+                    }
+                    bridge.call("update", f)?;
                 }
             }
             Ok(())
@@ -262,7 +289,8 @@ pub fn describe(op: &Op, name: &dyn Fn(&str) -> String) -> (char, String) {
 
 /// A rem's line straight from its raw doc (for restoring deleted subtrees).
 fn line_of_doc(d: &Value) -> LineJson {
-    let has_value = d.get("value").is_some_and(|v| !v.is_null());
+    // same rule as Kb::line_of: an empty array is no back
+    let has_value = d.get("value").is_some_and(|v| !v.is_null() && v.as_array().is_none_or(|a| !a.is_empty()));
     let heading = d.pointer("/ps/r_s/v/s").and_then(Value::as_str).and_then(|s| s.strip_prefix('H')).and_then(|n| n.parse::<u8>().ok());
     let kind = if let Some(h) = heading {
         format!("h{}", h.max(1))

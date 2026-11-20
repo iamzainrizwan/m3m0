@@ -94,6 +94,8 @@ enum Req {
 enum Resp {
     Opened(PathBuf, Result<Vec<(f32, f32)>, String>),
     Page(PathBuf, usize, u32, ColorImage),
+    /// skipped (scrolled past): may be asked for again
+    Dropped(PathBuf, usize, u32),
 }
 
 fn worker(rx: Receiver<Req>, tx: Sender<Resp>, repaint: impl Fn()) {
@@ -127,7 +129,8 @@ fn worker(rx: Receiver<Req>, tx: Sender<Resp>, repaint: impl Fn()) {
                 }
                 Req::Page(p, idx, w) => {
                     if n - i > 12 {
-                        continue; // scrolled past
+                        let _ = tx.send(Resp::Dropped(p, idx, w)); // scrolled past
+                        continue;
                     }
                     let Some(pdf) = docs.get(&p) else { continue };
                     let pages = pdf.pages();
@@ -138,6 +141,7 @@ fn worker(rx: Receiver<Req>, tx: Sender<Resp>, repaint: impl Fn()) {
                     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         render(page, &cache, &settings, &RenderSettings::default(), &PixmapSettings { x_scale: scale, y_scale: scale, bg_color: WHITE })
                     }));
+                    // a page that panics stays blank (asking again would loop)
                     if let Ok(px) = r {
                         let img = ColorImage::from_rgba_premultiplied([px.width() as usize, px.height() as usize], px.data_as_u8_slice());
                         let _ = tx.send(Resp::Page(p, idx, w, img));
@@ -291,6 +295,9 @@ impl Pdfs {
                 Resp::Page(p, i, w, img) => {
                     let t = ctx.load_texture(format!("pdf:{}:{i}", p.display()), img, TextureOptions::LINEAR);
                     self.tex.insert((p, i), (w, t));
+                }
+                Resp::Dropped(p, i, w) => {
+                    self.asked.remove(&(p, i, w));
                 }
             }
         }

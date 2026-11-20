@@ -77,6 +77,10 @@ impl App {
 
     /// Stage a Claude card into the notes, under the heading that best matches its section.
     fn stage_card(&mut self, d: &mut Loaded, card: usize) {
+        if self.committing.is_some() {
+            self.msg = Some("committing… try again when it's done".into());
+            return;
+        }
         let Some(c) = &self.cards else { return };
         let Some(t) = c.deck.get(card).cloned() else { return };
         let week = c.week.clone();

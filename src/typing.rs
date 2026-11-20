@@ -441,6 +441,252 @@ pub fn first_non_blank(cs: &[char]) -> usize {
     cs.iter().position(|c| !c.is_whitespace()).unwrap_or(0)
 }
 
+// --- vim commands inside a line: [count] [op [count]] motion / text object ---
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Target {
+    /// h l w b e W B E 0 ^ $
+    Motion(char),
+    /// f t F T + char
+    Find(char, char),
+    /// i / a + w W ( ) b [ ] { } B < > " ' ` $
+    Obj(bool, char),
+    /// dd cc yy: the whole line
+    Line,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Parsed {
+    /// wait for more keys
+    More,
+    Bad,
+    Move { count: usize, op: Option<char>, target: Target },
+    /// anything else (x p i a v D C r ~ u ...), with its count and argument
+    Other { count: usize, key: char, arg: Option<char> },
+}
+
+const MOTIONS: &str = "hlwbeWBE0^$ ";
+
+pub fn parse(s: &str, visual: bool) -> Parsed {
+    let cs: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    let num = |i: &mut usize| {
+        let st = *i;
+        while *i < cs.len() && cs[*i].is_ascii_digit() && !(*i == st && cs[*i] == '0') {
+            *i += 1;
+        }
+        cs[st..*i].iter().collect::<String>().parse::<usize>().ok()
+    };
+    let c1 = num(&mut i);
+    let Some(&c) = cs.get(i) else { return Parsed::More };
+    i += 1;
+    let mut count = c1.unwrap_or(1);
+    let target = |i: usize, op: bool| -> Option<Option<Target>> {
+        let Some(&t) = cs.get(i) else { return Some(None) };
+        Some(Some(match t {
+            'f' | 't' | 'F' | 'T' => match cs.get(i + 1) {
+                Some(&x) => Target::Find(t, x),
+                None => return Some(None),
+            },
+            'i' | 'a' if op || visual => match cs.get(i + 1) {
+                Some(&x) if "wW()b[]{}B<>\"'`$".contains(x) => Target::Obj(t == 'i', x),
+                Some(_) => return None,
+                None => return Some(None),
+            },
+            m if MOTIONS.contains(m) => Target::Motion(m),
+            _ => return None,
+        }))
+    };
+    if "dcy".contains(c) && !visual {
+        let c2 = num(&mut i);
+        count *= c2.unwrap_or(1);
+        if cs.get(i) == Some(&c) {
+            return Parsed::Move { count, op: Some(c), target: Target::Line };
+        }
+        return match target(i, true) {
+            None => Parsed::Bad,
+            Some(None) => Parsed::More,
+            Some(Some(t)) => Parsed::Move { count, op: Some(c), target: t },
+        };
+    }
+    if "fFtT".contains(c) || MOTIONS.contains(c) || (visual && "ia".contains(c)) {
+        return match target(i - 1, false) {
+            None => Parsed::Bad,
+            Some(None) => Parsed::More,
+            Some(Some(t)) => Parsed::Move { count, op: None, target: t },
+        };
+    }
+    if c == 'r' {
+        return match cs.get(i) {
+            Some(&x) => Parsed::Other { count, key: 'r', arg: Some(x) },
+            None => Parsed::More,
+        };
+    }
+    Parsed::Other { count, key: c, arg: None }
+}
+
+fn big(c: char) -> u8 {
+    if c.is_whitespace() { 0 } else { 1 }
+}
+
+/// W / B / E: like w b e over runs of non-blanks.
+fn word_big(cs: &[char], i: usize, m: char) -> usize {
+    let n = cs.len();
+    match m {
+        'W' => {
+            let mut j = i;
+            while j < n && big(cs[j]) == 1 {
+                j += 1;
+            }
+            while j < n && big(cs[j]) == 0 {
+                j += 1;
+            }
+            j
+        }
+        'B' => {
+            let mut j = i.min(n);
+            while j > 0 && big(cs[j - 1]) == 0 {
+                j -= 1;
+            }
+            while j > 0 && big(cs[j - 1]) == 1 {
+                j -= 1;
+            }
+            j
+        }
+        _ => {
+            let mut j = i + 1;
+            while j < n && big(cs[j]) == 0 {
+                j += 1;
+            }
+            while j + 1 < n && big(cs[j + 1]) == 1 {
+                j += 1;
+            }
+            j.min(n.saturating_sub(1))
+        }
+    }
+}
+
+/// Where a motion lands from `i`, `count` times.
+pub fn motion(cs: &[char], i: usize, m: char, count: usize) -> usize {
+    let n = cs.len();
+    let mut j = i;
+    for _ in 0..count.max(1) {
+        j = match m {
+            'h' => j.saturating_sub(1),
+            'l' | ' ' => (j + 1).min(n),
+            'w' => word_fwd(cs, j),
+            'b' => word_back(cs, j),
+            'e' => word_end(cs, j),
+            'W' | 'B' | 'E' => word_big(cs, j, m),
+            '0' => 0,
+            '^' => first_non_blank(cs),
+            '$' => n,
+            _ => j,
+        };
+    }
+    j
+}
+
+/// `f t F T` repeated `count` times.
+pub fn find_n(cs: &[char], i: usize, kind: char, ch: char, count: usize) -> Option<usize> {
+    let mut j = i;
+    for k in 0..count.max(1) {
+        // t / T: step past the char we stopped next to, or they'd stick
+        let from = match (kind, k) {
+            ('t', k) if k > 0 => j + 1,
+            ('T', k) if k > 0 => j.saturating_sub(1),
+            _ => j,
+        };
+        j = find(cs, from, kind, ch)?;
+    }
+    Some(j)
+}
+
+/// Text object `i`/`a` + `w W ( b [ { B < " ' `` ` `` $` around `i`: (start, end).
+pub fn object(cs: &[char], i: usize, inner: bool, o: char) -> Option<(usize, usize)> {
+    let n = cs.len();
+    if n == 0 {
+        return None;
+    }
+    let i = i.min(n - 1);
+    match o {
+        'w' | 'W' => {
+            let (a, z) = if o == 'w' {
+                inner_word(cs, i)
+            } else {
+                let c = big(cs[i]);
+                let (mut a, mut z) = (i, i + 1);
+                while a > 0 && big(cs[a - 1]) == c {
+                    a -= 1;
+                }
+                while z < n && big(cs[z]) == c {
+                    z += 1;
+                }
+                (a, z)
+            };
+            if inner {
+                return Some((a, z));
+            }
+            // aw: the trailing blanks too, else the leading ones
+            let mut z2 = z;
+            while z2 < n && cs[z2].is_whitespace() {
+                z2 += 1;
+            }
+            if z2 > z {
+                return Some((a, z2));
+            }
+            let mut a2 = a;
+            while a2 > 0 && cs[a2 - 1].is_whitespace() {
+                a2 -= 1;
+            }
+            Some((a2, z))
+        }
+        '(' | ')' | 'b' | '[' | ']' | '{' | '}' | 'B' | '<' | '>' => {
+            let (op, cl) = match o {
+                '(' | ')' | 'b' => ('(', ')'),
+                '[' | ']' => ('[', ']'),
+                '<' | '>' => ('<', '>'),
+                _ => ('{', '}'),
+            };
+            // the nearest unmatched opener at or before the cursor
+            let mut depth = 0;
+            let mut a = None;
+            for j in (0..=i).rev() {
+                if cs[j] == cl && j != i {
+                    depth += 1;
+                } else if cs[j] == op {
+                    if depth == 0 {
+                        a = Some(j);
+                        break;
+                    }
+                    depth -= 1;
+                }
+            }
+            let a = a?;
+            let mut depth = 0;
+            let z = (a + 1..n).find(|&j| {
+                if cs[j] == op {
+                    depth += 1;
+                } else if cs[j] == cl {
+                    if depth == 0 {
+                        return true;
+                    }
+                    depth -= 1;
+                }
+                false
+            })?;
+            Some(if inner { (a + 1, z) } else { (a, z + 1) })
+        }
+        '"' | '\'' | '`' | '$' => {
+            let qs: Vec<usize> = (0..n).filter(|&j| cs[j] == o && (j == 0 || cs[j - 1] != '\\')).collect();
+            let pair = qs.chunks(2).filter(|p| p.len() == 2).find(|p| p[0] <= i && i <= p[1]).or_else(|| qs.chunks(2).filter(|p| p.len() == 2).find(|p| p[0] > i))?;
+            let (a, z) = (pair[0], pair[1]);
+            Some(if inner { (a + 1, z) } else { (a, z + 1) })
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -540,5 +786,40 @@ mod tests {
         assert_eq!(find(&cs, 0, 't', 'b'), Some(3));
         assert_eq!(find(&cs, 10, 'F', 'b'), Some(8));
         assert_eq!(find(&cs, 10, 'T', 'b'), Some(9));
+    }
+
+    #[test]
+    fn vim_parse() {
+        assert_eq!(parse("3", false), Parsed::More);
+        assert_eq!(parse("3w", false), Parsed::Move { count: 3, op: None, target: Target::Motion('w') });
+        assert_eq!(parse("2d3w", false), Parsed::Move { count: 6, op: Some('d'), target: Target::Motion('w') });
+        assert_eq!(parse("d", false), Parsed::More);
+        assert_eq!(parse("di", false), Parsed::More);
+        assert_eq!(parse("ci(", false), Parsed::Move { count: 1, op: Some('c'), target: Target::Obj(true, '(') });
+        assert_eq!(parse("da\"", false), Parsed::Move { count: 1, op: Some('d'), target: Target::Obj(false, '"') });
+        assert_eq!(parse("dd", false), Parsed::Move { count: 1, op: Some('d'), target: Target::Line });
+        assert_eq!(parse("2fx", false), Parsed::Move { count: 2, op: None, target: Target::Find('f', 'x') });
+        assert_eq!(parse("0", false), Parsed::Move { count: 1, op: None, target: Target::Motion('0') });
+        assert_eq!(parse("10l", false), Parsed::Move { count: 10, op: None, target: Target::Motion('l') });
+        assert_eq!(parse("3x", false), Parsed::Other { count: 3, key: 'x', arg: None });
+        assert_eq!(parse("r", false), Parsed::More);
+        assert_eq!(parse("rq", false), Parsed::Other { count: 1, key: 'r', arg: Some('q') });
+        assert_eq!(parse("dz", false), Parsed::Bad);
+        assert_eq!(parse("iw", true), Parsed::Move { count: 1, op: None, target: Target::Obj(true, 'w') });
+    }
+
+    #[test]
+    fn objects() {
+        let cs: Vec<char> = "f(a, (b)) say \"hi there\" $x^2$".chars().collect();
+        assert_eq!(object(&cs, 2, true, '('), Some((2, 8)));
+        assert_eq!(object(&cs, 6, true, 'b'), Some((6, 7)));
+        assert_eq!(object(&cs, 6, false, '('), Some((5, 8)));
+        assert_eq!(object(&cs, 17, true, '"'), Some((15, 23)));
+        assert_eq!(object(&cs, 10, true, '"'), Some((15, 23)));
+        assert_eq!(object(&cs, 26, true, '$'), Some((26, 29)));
+        assert_eq!(object(&cs, 10, false, 'w'), Some((10, 14)));
+        assert_eq!(motion(&cs, 0, 'w', 2), 2);
+        assert_eq!(motion(&cs, 0, 'W', 2), 10);
+        assert_eq!(find_n(&cs, 0, 'f', '(', 2), Some(5));
     }
 }

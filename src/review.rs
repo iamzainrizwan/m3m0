@@ -95,6 +95,8 @@ impl App {
             }
             K::Esc | K::Ch('q') => {
                 let msg = format!("reviewed {} cards{}", r.graded, if r.failed.is_empty() { String::new() } else { format!(", {} failed to save", r.failed.len()) });
+                // grades still on their way: keep listening, say if any fail
+                self.grading.append(&mut r.inflight);
                 self.review = None;
                 self.msg = Some(msg);
             }

@@ -679,7 +679,8 @@ pub fn inline(s: &str, resolve: &dyn Fn(&str) -> Option<String>, side: &Side, ne
             }
         }
         if let Some(inner) = rest.strip_prefix('*') {
-            if let Some(end) = inner.find('*') {
+            // `*…*` needs something inside: `2**3` stays literal
+            if let Some(end) = inner.find('*').filter(|&e| e > 0) {
                 for sp in inline(&inner[..end], resolve, side, new_cloze) {
                     out.push(match sp {
                         Span::Text { t, b, code, cloze, extra, .. } => Span::Text { t, b, i: true, u: false, code, cloze, extra },
@@ -735,6 +736,13 @@ pub fn inline(s: &str, resolve: &dyn Fn(&str) -> Option<String>, side: &Side, ne
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lone_stars_stay() {
+        let l = text_to_line("a 2**3 b", &|_| None, &Side::default(), &mut || "1".into());
+        assert_eq!(plain(&l.front, &|_| String::new()), "a 2**3 b");
+        assert!(l.front.iter().all(|s| !matches!(s, Span::Text { i: true, .. })));
+    }
 
     fn rt(s: &str) -> Vec<Span> {
         parse_rt(Some(&serde_json::from_str(s).unwrap()))

@@ -30,6 +30,8 @@ pub struct Editing {
     pub op: String,
     /// set the List Item flag on save (typed `1.` in a >>> card's item)
     pub list: Option<bool>,
+    /// line-mode undo (`u`): text and caret before each change
+    pub hist: Vec<(String, usize)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -187,7 +189,8 @@ impl App {
         let mut side = rich::Side::default();
         let buf = rich::line_to_text(&orig, &|r| d.kb.name(r), &mut side);
         let at = if at_end { buf.chars().count() } else { 0 };
-        self.editing = Some(Editing { id: id.to_owned(), buf, side, orig, fresh: true, created, ac: None, sel: (at, at), push: true, undo: None, slash: None, mode: LineMode::Insert, op: String::new(), list: None });
+        let orig_text = buf.clone();
+        self.editing = Some(Editing { id: id.to_owned(), buf, side, orig, fresh: true, created, ac: None, sel: (at, at), push: true, undo: None, slash: None, mode: LineMode::Insert, op: String::new(), list: None, hist: vec![(orig_text, at)] });
         self.focus = Focus::Notes;
     }
 
@@ -201,7 +204,7 @@ impl App {
             }
         }
         if e.created && e.buf.trim().is_empty() {
-            self.changes.drop_last(&mut d.kb); // drop the Create
+            self.changes.drop_create(&mut d.kb, &e.id); // drop the Create
             return None;
         }
         let near = e.id.clone();
@@ -217,6 +220,7 @@ impl App {
                 if *id == e.id {
                     after.list = after.list.or(l.list);
                     let list = after.list;
+                    self.changes.version += 1;
                     *l = after;
                     crate::edit::set_line(&mut d.kb, &e.id, &line);
                     if let Some(on) = list {
@@ -263,7 +267,9 @@ impl App {
             let Some((gp, ppos)) = Self::parent_pos(d, &p) else { return false };
             (gp, ppos + 1)
         };
-        self.changes.drop_last(&mut d.kb);
+        if !self.changes.drop_create(&mut d.kb, &id) {
+            return false;
+        }
         self.changes.apply(&mut d.kb, Op::Create { id: id.clone(), parent: to.0, pos: to.1, line });
         self.cursor_to(d, &id);
         true
@@ -291,9 +297,7 @@ impl App {
             let rows = note_rows(&d.kb, &page, &self.folded);
             let i = rows.iter().position(|r| r.0 == id).unwrap_or(0);
             self.editing = None;
-            if created {
-                self.changes.drop_last(&mut d.kb);
-            } else {
+            if !(created && self.changes.drop_create(&mut d.kb, &id)) {
                 self.delete(d, &id);
             }
             if let Some(prev) = i.checked_sub(1).and_then(|i| rows.get(i)) {
@@ -372,10 +376,10 @@ impl App {
         let sp = rich::Span::Text { t: " ".into(), b: false, i: false, u: false, code: false, cloze: None, extra: Default::default() };
         let mut l = a.clone();
         let tail = b.front.clone();
-        if a.back.is_empty() && matches!(a.kind, rich::Kind::Plain | rich::Kind::Heading(_)) {
+        if a.back.is_empty() {
             l.front.push(sp.clone());
             l.front.extend(tail);
-            if b.kind != rich::Kind::Plain {
+            if matches!(a.kind, rich::Kind::Plain | rich::Kind::Heading(_)) && b.kind != rich::Kind::Plain {
                 l.kind = if matches!(b.kind, rich::Kind::Heading(_)) { a.kind } else { b.kind };
                 l.back = b.back.clone();
             }
@@ -505,199 +509,265 @@ impl App {
         true
     }
 
-    /// vim normal / visual inside the line being edited.
+    /// vim normal / visual inside the line being edited:
+    /// `[count] [op [count]] motion | text object`, plus x X r ~ s S D C p P u.
     fn line_normal(&mut self, d: &mut Loaded, k: K) {
         let Some(e) = &mut self.editing else { return };
+        let mode = e.mode;
+        let visual = matches!(mode, LineMode::Visual(_));
+        // keys that aren't commands in the line
+        match k {
+            K::Esc => {
+                if !e.op.is_empty() {
+                    e.op.clear();
+                } else if visual {
+                    e.mode = LineMode::Normal;
+                } else if let Some(id) = self.finish_edit(d) {
+                    self.cursor_to(d, &id);
+                }
+                return;
+            }
+            K::Up | K::Down | K::Enter => return self.leave_line(d, if matches!(k, K::Up) { -1 } else { 1 }),
+            _ => {}
+        }
+        let c = match k {
+            K::Ch(c) => c,
+            K::Left | K::Back => 'h',
+            K::Right => 'l',
+            _ => return,
+        };
+        e.op.push(c);
+        let parsed = typing::parse(&e.op, visual);
+        if parsed == typing::Parsed::More {
+            return;
+        }
+        e.op.clear();
         let cs: Vec<char> = e.buf.chars().collect();
         let n = cs.len();
         let last = n.saturating_sub(1);
         let caret = e.sel.1.min(last);
-        let op = std::mem::take(&mut e.op);
-        let mode = e.mode;
-        // a range for d / c / y (or the visual selection)
-        let mut range: Option<(usize, usize)> = None;
-        let mut act = op.chars().next().filter(|c| "dcy".contains(*c));
-        let mut to: Option<usize> = None;
-        let pend = op.chars().last();
-        match (pend, k) {
-            (Some(f @ ('f' | 't' | 'F' | 'T')), K::Ch(c)) => {
-                if let Some(j) = typing::find(&cs, caret, f, c) {
-                    if act.is_some() {
-                        range = Some(if "ft".contains(f) { (caret, j + 1) } else { (j, caret) });
-                    } else {
-                        to = Some(j);
+        match parsed {
+            typing::Parsed::More | typing::Parsed::Bad => {}
+            typing::Parsed::Move { count, op, target } => {
+                use typing::Target as T;
+                // text objects in visual mode select
+                if let (true, T::Obj(inner, o)) = (visual, target) {
+                    if let Some((a, z)) = typing::object(&cs, caret, inner, o).filter(|r| r.1 > r.0) {
+                        e.mode = LineMode::Visual(a);
+                        e.sel = (z - 1, z - 1);
+                        e.push = true;
                     }
+                    return;
                 }
-            }
-            (Some('i'), K::Ch('w')) if act.is_some() => range = Some(typing::inner_word(&cs, caret)),
-            (Some('i'), _) => {}
-            (_, K::Ch(c @ ('f' | 't' | 'F' | 'T' | 'i'))) if !op.is_empty() || c != 'i' => {
-                e.op = format!("{op}{c}");
-                return;
-            }
-            (_, K::Ch(c @ ('d' | 'c' | 'y'))) if op.is_empty() && !matches!(mode, LineMode::Visual(_)) => {
-                e.op = c.to_string();
-                return;
-            }
-            (Some(o), K::Ch(c)) if o == c && act.is_some() => {
-                // dd: the whole bullet · cc: clear the line · yy: yank the line
-                match c {
-                    'd' => {
-                        let id = e.id.clone();
+                let range: Option<(usize, usize)> = match target {
+                    T::Line => Some((0, n)),
+                    T::Obj(inner, o) => typing::object(&cs, caret, inner, o),
+                    T::Find(f, ch) => typing::find_n(&cs, caret, f, ch, count).map(|j| if "ft".contains(f) { (caret, j + 1) } else { (j, caret) }),
+                    // cw on a word changes to its end (vim's quirk)
+                    T::Motion('w') if op == Some('c') && cs.get(caret).is_some_and(|c| !c.is_whitespace()) => {
+                        let mut z = typing::inner_word(&cs, caret).1;
+                        for _ in 1..count {
+                            z = (typing::word_end(&cs, z.saturating_sub(1)) + 1).min(n);
+                        }
+                        Some((caret, z))
+                    }
+                    T::Motion(m) => {
+                        let t = typing::motion(&cs, caret, m, count);
+                        let incl = "eE".contains(m);
+                        Some(if t >= caret { (caret, if incl { (t + 1).min(n) } else { t }) } else { (t, caret) })
+                    }
+                };
+                match op {
+                    None => {
+                        // a plain motion: move (never past the last char)
+                        let to = match target {
+                            T::Find(f, ch) => typing::find_n(&cs, caret, f, ch, count),
+                            T::Motion(m) => Some(typing::motion(&cs, caret, m, count).min(last)),
+                            _ => None,
+                        };
+                        if let Some(t) = to {
+                            e.sel = (t, t);
+                            e.push = true;
+                        }
+                    }
+                    Some('d') if target == T::Line => {
+                        let (id, created) = (e.id.clone(), e.created);
                         self.editing = None;
                         self.reg = Some(Reg::Bullets(clip(&d.kb, std::slice::from_ref(&id))));
-                        self.delete(d, &id);
-                        return;
+                        if !(created && self.changes.drop_create(&mut d.kb, &id)) {
+                            self.delete(d, &id);
+                        }
                     }
-                    _ => range = Some((0, n)),
+                    Some(op) => {
+                        if let Some((a, z)) = range {
+                            self.line_op(op, a, z);
+                        }
+                    }
                 }
             }
-            (_, K::Ch('h') | K::Left | K::Back) => to = Some(caret.saturating_sub(1)),
-            (_, K::Ch('l') | K::Right | K::Ch(' ')) => to = Some((caret + 1).min(if act.is_some() { n } else { last })),
-            // cw changes to the end of the word (vim's quirk)
-            (_, K::Ch('w')) if act == Some('c') => range = Some((caret, typing::inner_word(&cs, caret).1)),
-            (_, K::Ch('w')) => to = Some(typing::word_fwd(&cs, caret)),
-            (_, K::Ch('b')) => to = Some(typing::word_back(&cs, caret)),
-            (_, K::Ch('e')) => to = Some(typing::word_end(&cs, caret)),
-            (_, K::Ch('0')) => to = Some(0),
-            (_, K::Ch('^')) => to = Some(typing::first_non_blank(&cs)),
-            (_, K::Ch('$')) => to = Some(if act.is_some() { n } else { last }),
-            _ => {}
+            typing::Parsed::Other { count, key, arg } => self.line_other(d, key, count, arg, &cs, caret),
         }
-        // motion + operator = range (inclusive for e)
-        if let (Some(t), Some(_)) = (to, act) {
-            if range.is_none() {
-                range = Some(if t >= caret {
-                    let incl = matches!(k, K::Ch('e')) || matches!(pend, Some('f' | 't'));
-                    (caret, if incl { (t + 1).min(n) } else { t })
-                } else {
-                    (t, caret)
-                });
-            }
-            to = None;
+    }
+
+    /// d / c / y over chars a..z of the line being edited.
+    fn line_op(&mut self, op: char, a: usize, z: usize) {
+        let Some(e) = &mut self.editing else { return };
+        let n = e.buf.chars().count();
+        let (a, z) = (a.min(n), z.min(n));
+        let text: String = e.buf.chars().skip(a).take(z - a).collect();
+        if !text.is_empty() {
+            self.reg = Some(Reg::Text(text));
         }
-        if let LineMode::Visual(a) = mode {
-            if matches!(k, K::Ch('d' | 'x' | 'c' | 'y')) {
-                range = Some((a.min(caret), (a.max(caret) + 1).min(n)));
-                act = match k {
-                    K::Ch('x') => Some('d'),
-                    K::Ch(c) => Some(c),
-                    _ => None,
-                };
-            }
+        if op != 'y' && z > a {
+            e.hist.push((e.buf.clone(), e.sel.1));
+            let mut b = e.buf();
+            b.anchor = a;
+            b.caret = z;
+            typing::backspace(&mut b, &mut None);
+            e.set(b);
         }
-        let e = self.editing.as_mut().unwrap();
-        if let (Some((a, z)), Some(op)) = (range, act) {
-            let (a, z) = (a.min(n), z.min(n));
-            let text: String = cs[a..z].iter().collect();
-            if !text.is_empty() {
-                self.reg = Some(Reg::Text(text));
-            }
-            if op != 'y' && z > a {
-                let mut b = e.buf();
-                b.anchor = a;
-                b.caret = z;
-                typing::backspace(&mut b, &mut None);
-                e.set(b);
-            }
+        if op == 'c' {
+            e.hist.push((e.buf.clone(), a));
+            e.mode = LineMode::Insert;
+            e.sel = (a, a);
+        } else {
             let left = e.buf.chars().count();
-            let c = if op == 'c' { a } else { a.min(left.saturating_sub(1)) };
+            let c = a.min(left.saturating_sub(1));
             e.sel = (c, c);
-            e.push = true;
-            e.mode = if op == 'c' { LineMode::Insert } else { LineMode::Normal };
-            return;
+            e.mode = LineMode::Normal;
         }
-        if let Some(t) = to {
-            e.sel = (t, t);
-            e.push = true;
-            return;
-        }
-        let at = |e: &mut Editing, c: usize| {
+        e.push = true;
+    }
+
+    /// Line-mode commands that aren't motions.
+    fn line_other(&mut self, d: &mut Loaded, key: char, count: usize, arg: Option<char>, cs: &[char], caret: usize) {
+        let Some(e) = &mut self.editing else { return };
+        let n = cs.len();
+        let visual = match e.mode {
+            LineMode::Visual(a) => Some((a.min(caret), (a.max(caret) + 1).min(n))),
+            _ => None,
+        };
+        let insert = |e: &mut Editing, c: usize| {
+            e.hist.push((e.buf.clone(), c));
             e.sel = (c, c);
             e.push = true;
             e.mode = LineMode::Insert;
         };
-        match k {
-            K::Esc if matches!(mode, LineMode::Visual(_)) => e.mode = LineMode::Normal,
-            K::Esc if !op.is_empty() => {}
-            K::Esc => {
-                if let Some(id) = self.finish_edit(d) {
-                    self.cursor_to(d, &id);
+        let edit = |e: &mut Editing, f: &mut dyn FnMut(&mut Vec<char>) -> usize| {
+            e.hist.push((e.buf.clone(), e.sel.1));
+            let mut v: Vec<char> = e.buf.chars().collect();
+            let c = f(&mut v);
+            e.buf = v.into_iter().collect();
+            let c = c.min(e.buf.chars().count().saturating_sub(1));
+            e.sel = (c, c);
+            e.push = true;
+        };
+        match (key, visual) {
+            ('d' | 'x' | 'X' | 'c' | 's' | 'y', Some((a, z))) => {
+                let op = match key {
+                    'x' | 'X' => 'd',
+                    's' => 'c',
+                    k => k,
+                };
+                self.line_op(op, a, z);
+            }
+            ('~', Some((a, z))) => {
+                edit(e, &mut |v| {
+                    for c in &mut v[a..z] {
+                        *c = flip(*c);
+                    }
+                    a
+                });
+                e.mode = LineMode::Normal;
+            }
+            ('v', Some(_)) => e.mode = LineMode::Normal,
+            ('v', None) if n > 0 => e.mode = LineMode::Visual(caret),
+            ('i', _) => insert(e, caret),
+            ('a', _) => insert(e, (caret + 1).min(n)),
+            ('I', _) => insert(e, typing::first_non_blank(cs)),
+            ('A', _) => insert(e, n),
+            ('x', None) if n > 0 => {
+                let z = (caret + count).min(n);
+                self.line_op('d', caret, z);
+            }
+            ('X', None) if caret > 0 => {
+                let a = caret.saturating_sub(count);
+                self.line_op('d', a, caret);
+            }
+            ('s', None) => self.line_op('c', caret, (caret + count).min(n)),
+            ('S', _) => self.line_op('c', 0, n),
+            ('D', None) => self.line_op('d', caret, n),
+            ('C', None) => self.line_op('c', caret, n),
+            ('r', None) if n > 0 => {
+                if let Some(ch) = arg {
+                    let z = (caret + count).min(n);
+                    edit(e, &mut |v| {
+                        for c in &mut v[caret..z] {
+                            *c = ch;
+                        }
+                        z - 1
+                    });
                 }
             }
-            K::Ch('v') if matches!(mode, LineMode::Visual(_)) => e.mode = LineMode::Normal,
-            K::Ch('v') if n > 0 => e.mode = LineMode::Visual(caret),
-            K::Ch('i') => at(e, caret),
-            K::Ch('a') => at(e, (caret + 1).min(n)),
-            K::Ch('I') => at(e, typing::first_non_blank(&cs)),
-            K::Ch('A') => at(e, n),
-            K::Ch('x') if n > 0 => {
-                self.reg = Some(Reg::Text(cs[caret].to_string()));
-                let mut b = e.buf();
-                b.anchor = caret;
-                b.caret = caret + 1;
-                typing::backspace(&mut b, &mut None);
-                let c = caret.min(b.text.chars().count().saturating_sub(1));
-                e.set(b);
-                e.sel = (c, c);
+            ('~', None) if n > 0 => {
+                let z = (caret + count).min(n);
+                edit(e, &mut |v| {
+                    for c in &mut v[caret..z] {
+                        *c = flip(*c);
+                    }
+                    z
+                });
             }
-            K::Ch('D' | 'C') => {
-                self.reg = Some(Reg::Text(cs[caret.min(n)..].iter().collect()));
-                let mut b = e.buf();
-                b.anchor = caret.min(n);
-                b.caret = n;
-                typing::backspace(&mut b, &mut None);
-                e.set(b);
-                if matches!(k, K::Ch('C')) {
-                    at(e, caret.min(n));
-                } else {
-                    let c = caret.saturating_sub(1);
+            ('u', _) => match e.hist.pop() {
+                Some((b, c)) => {
+                    e.buf = b;
+                    let c = c.min(e.buf.chars().count().saturating_sub(1));
                     e.sel = (c, c);
+                    e.push = true;
+                    e.mode = LineMode::Normal;
                 }
-            }
-            K::Ch('p' | 'P') => {
+                None => self.msg = Some("nothing to undo in this line".into()),
+            },
+            ('p' | 'P', _) => {
                 let t = match &self.reg {
                     Some(Reg::Text(t)) => t.clone(),
                     Some(Reg::Bullets(b)) => b.iter().filter(|x| x.1.is_none()).map(|x| rich::plain(&x.2.line().front, &|r| d.kb.name(r))).collect::<Vec<_>>().join(" "),
                     None => return,
                 };
-                let c = if matches!(k, K::Ch('p')) && n > 0 { caret + 1 } else { caret };
-                let mut b = e.buf();
-                b.anchor = c;
-                b.caret = c;
-                for ch in t.chars() {
-                    // pasted text goes in as is, no auto-anything
-                    let at = b.caret;
-                    let mut v: Vec<char> = b.text.chars().collect();
-                    v.insert(at, ch);
-                    b.text = v.into_iter().collect();
-                    b.caret += 1;
-                }
-                let end = b.caret.saturating_sub(1);
-                e.set(b);
-                e.sel = (end, end);
+                let t = t.repeat(count);
+                let at = if key == 'p' && n > 0 { caret + 1 } else { caret };
+                // pasted text goes in as is, no auto-anything
+                edit(e, &mut |v| {
+                    for (i, ch) in t.chars().enumerate() {
+                        v.insert(at + i, ch);
+                    }
+                    (at + t.chars().count()).saturating_sub(1)
+                });
             }
-            K::Ch('o') => {
+            ('o', None) => {
                 e.sel = (n, n);
                 e.mode = LineMode::Insert;
                 self.enter(d);
             }
-            K::Ch('V') => {
+            ('V', _) => {
                 if let Some(id) = self.finish_edit(d) {
                     self.cursor_to(d, &id);
                     self.visual = Some(id);
                 }
             }
-            K::Ch('j' | 'k') | K::Up | K::Down | K::Enter => {
-                if let Some(id) = self.finish_edit(d) {
-                    self.cursor_to(d, &id);
-                    let page = self.week.clone().unwrap_or_default();
-                    let len = note_rows(&d.kb, &page, &self.folded).len();
-                    let by = if matches!(k, K::Ch('k') | K::Up) { -1 } else { 1 };
-                    self.note_cur = (self.note_cur as isize + by).clamp(0, len as isize - 1) as usize;
-                }
-            }
+            ('j', _) => self.leave_line(d, count as isize),
+            ('k', _) => self.leave_line(d, -(count as isize)),
             _ => {}
+        }
+    }
+
+    /// Save the line and move the bullet cursor by `by`.
+    fn leave_line(&mut self, d: &mut Loaded, by: isize) {
+        if let Some(id) = self.finish_edit(d) {
+            self.cursor_to(d, &id);
+            let page = self.week.clone().unwrap_or_default();
+            let len = note_rows(&d.kb, &page, &self.folded).len();
+            self.note_cur = (self.note_cur as isize + by).clamp(0, len as isize - 1) as usize;
         }
     }
 
@@ -805,6 +875,14 @@ impl App {
     pub(super) fn edit_key(&mut self, d: &mut Loaded, prefix: &str, k: K, n: usize, rows: &[(String, usize)]) -> bool {
         // cards view hides the notes: editing there typed into an invisible bullet
         if self.focus != Focus::Notes || self.week.is_none() || self.cards.is_some() {
+            return false;
+        }
+        // a commit in flight owns the staged ops: no edits until it's back
+        if self.committing.is_some() {
+            if matches!(k, K::Ch('i' | 'I' | 'a' | 'A' | 'o' | 'O' | 'd' | '>' | '<' | 'u' | 'p' | 'P' | 'J' | '.' | 'V') | K::Alt(_) | K::Ctrl('r')) {
+                self.msg = Some("committing… edits wait until it's done".into());
+                return true;
+            }
             return false;
         }
         let cur = rows.get(self.note_cur).map(|r| r.0.clone());
@@ -1100,8 +1178,7 @@ impl App {
                 let page = self.week.clone().unwrap_or_default();
                 let rows = note_rows(&d.kb, &page, &self.folded);
                 let i = rows.iter().position(|r| r.0 == e.id).unwrap_or(0);
-                if e.created {
-                    self.changes.drop_last(&mut d.kb);
+                if e.created && self.changes.drop_create(&mut d.kb, &e.id) {
                 } else if d.kb.children(Some(&e.id)).is_empty() {
                     self.delete(d, &e.id);
                 } else {
@@ -1268,13 +1345,25 @@ pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb) {
     }
 }
 
+fn flip(c: char) -> char {
+    if c.is_uppercase() {
+        c.to_lowercase().next().unwrap_or(c)
+    } else {
+        c.to_uppercase().next().unwrap_or(c)
+    }
+}
+
 /// Bullets (with everything under them) as register items, root first.
 fn clip(kb: &Kb, ids: &[String]) -> Vec<(String, Option<String>, LineJson)> {
     let mut out = vec![];
     for id in ids {
         for (i, k) in edit::subtree(kb, id).into_iter().enumerate() {
             let parent = if i == 0 { None } else { kb.q.get(&k).and_then(|x| x.get("parent")).and_then(|p| p.as_str()).map(str::to_owned) };
-            out.push((k.clone(), parent, LineJson::of(&kb.line_of(&k))));
+            let mut l = LineJson::of(&kb.line_of(&k));
+            if kb.is_list_item(&k) {
+                l.list = Some(true);
+            }
+            out.push((k.clone(), parent, l));
         }
     }
     out

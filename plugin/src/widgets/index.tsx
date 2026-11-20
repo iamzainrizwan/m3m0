@@ -25,7 +25,13 @@ async function apply(plugin: ReactRNPlugin, m: Msg): Promise<any> {
     case 'create': {
       const r = await plugin.rem.createRem();
       if (!r) throw new Error('createRem returned nothing');
-      await set(plugin, r._id, m);
+      try {
+        await set(plugin, r._id, m);
+      } catch (e) {
+        // don't leave a half-made orphan rem behind
+        await r.remove().catch(() => {});
+        throw e;
+      }
       return { id: r._id };
     }
     case 'update':

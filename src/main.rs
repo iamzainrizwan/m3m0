@@ -201,8 +201,9 @@ struct App {
     replay_at: f64,
     last_search: Option<String>,
     links: std::collections::HashMap<String, String>,
-    /// staged ops as last written to disk (edit::Staged); None until restored
-    staged_disk: Option<String>,
+    /// staged ops as last written to disk (edit::Staged) and for which db;
+    /// None until restored (once, on the first load)
+    staged_disk: Option<(PathBuf, Option<u64>)>,
     /// y / d register (bullets or text)
     reg: Option<editor::Reg>,
     /// V over bullets: the anchor bullet
@@ -214,6 +215,8 @@ struct App {
     due: (f64, std::collections::HashMap<String, usize>),
     /// cards graded this session (the snapshot doesn't know yet)
     graded: HashSet<String>,
+    /// grades still in flight after leaving review
+    grading: Vec<mpsc::Receiver<(String, Result<serde_json::Value, String>)>>,
 }
 
 fn load(db: Option<PathBuf>) -> Result<Loaded, String> {
@@ -351,6 +354,7 @@ impl App {
             insert_from: None,
             due: (f64::NEG_INFINITY, Default::default()),
             graded: HashSet::new(),
+            grading: vec![],
         }
     }
 
@@ -368,6 +372,10 @@ impl App {
     /// module's last week, and open it. Number and title come from
     /// uni-git/<module>/data/module.json when there is one (reading weeks skipped).
     fn new_week(&mut self, d: &mut Loaded, trows: &[(String, bool)]) {
+        if self.committing.is_some() {
+            self.msg = Some("committing… try again when it's done".into());
+            return;
+        }
         let Some((id, is_mod)) = trows.get(self.tree_cur).cloned() else { return };
         let m = if is_mod {
             id
@@ -1091,6 +1099,10 @@ impl App {
                 K::Ch('j') | K::Down => *cur = (*cur + 1).min(list.len().saturating_sub(1)),
                 K::Ch('k') | K::Up => *cur = cur.saturating_sub(1),
                 K::Esc | K::Ch('q') => self.overlay = Overlay::None,
+                K::Enter | K::Ch('l') if !self.changes.ops.is_empty() => {
+                    self.overlay = Overlay::None;
+                    self.msg = Some("staged changes belong to this database: :w or :e! first".into());
+                }
                 K::Enter | K::Ch('l') => {
                     if let Some(c) = list.get(*cur) {
                         let p = c.path.clone();
@@ -1224,6 +1236,10 @@ impl App {
 
     /// Stage the inverse of a past commit (newest op first) for review with :w.
     fn stage_revert(&mut self, ops: &[edit::Op]) {
+        if self.committing.is_some() {
+            self.msg = Some("committing… try again when it's done".into());
+            return;
+        }
         let Some(Ok(d)) = &mut self.data else { return };
         let mut n = 0;
         self.changes.begin();
@@ -1260,12 +1276,23 @@ impl App {
         }
         let Some(Ok(d)) = &self.data else { return };
         // children of rems becoming >>> cards, as they are now
+        // children of rems becoming (or stopping being) >>> cards, and rems
+        // created or moved under a >>> card: they're its items
         let mut children = std::collections::HashMap::new();
+        let mut items = HashSet::new();
+        let multi = |p: &str| d.kb.line_of(p).kind == rich::Kind::MultiLine;
         for op in &ops {
-            if let edit::Op::Update { id, after, .. } = op {
-                if after.kind == "multiline" {
+            match op {
+                edit::Op::Update { id, before, after } if (after.kind == "multiline") != (before.kind == "multiline") => {
                     children.insert(id.clone(), d.kb.children(Some(id)).to_vec());
                 }
+                edit::Op::Create { id, parent, line, .. } if line.kind != "__restore__" && multi(parent) => {
+                    items.insert(id.clone());
+                }
+                edit::Op::Move { id, to, .. } if multi(&to.0) => {
+                    items.insert(id.clone());
+                }
+                _ => {}
             }
         }
         let bridge = self.bridge.clone();
@@ -1284,7 +1311,7 @@ impl App {
                     return;
                 }
             }
-            let out = commit::run(&bridge, &ops, &children);
+            let out = commit::run(&bridge, &ops, &children, &items);
             let _ = tx.send((out, ops));
         });
         self.committing = Some(rx);
@@ -1305,6 +1332,11 @@ impl App {
             rename_ids(&mut d.kb, m);
         }
         self.folded = self.folded.iter().map(|f| m.get(f).cloned().unwrap_or_else(|| f.clone())).collect();
+        // claude-card links staged on new rems: move them to the real ids
+        if self.links.keys().any(|k| m.contains_key(k)) {
+            self.links = std::mem::take(&mut self.links).into_iter().map(|(k, v)| (m.get(&k).cloned().unwrap_or(k), v)).collect();
+            deck::save_links(&self.links);
+        }
         if let Some(w) = &self.week {
             if let Some(r) = m.get(w) {
                 self.week = Some(r.clone());
@@ -1323,31 +1355,56 @@ impl App {
     }
 
     /// Staged ops left from a crash or a killed session: re-apply them.
+    /// Only on the first load: a later :e / :db must never bring back ops that
+    /// were just dropped. Ops whose rems are gone, or whose text changed in
+    /// RemNote since (a stale `before`), are skipped rather than overwrite it.
     fn restore_staged(&mut self) {
-        if std::env::var("M3M0_SHOTS").is_ok() {
+        if std::env::var("M3M0_SHOTS").is_ok() || self.staged_disk.is_some() {
             return;
         }
         let Some(Ok(d)) = &mut self.data else { return };
-        if let Some(st) = edit::Staged::load().filter(|st| st.db == d.db && !st.ops.is_empty() && self.changes.ops.is_empty()) {
-            let n = st.ops.len();
-            for op in st.ops {
+        self.staged_disk = Some((d.db.clone(), None));
+        let Some(st) = edit::Staged::load().filter(|st| st.db == d.db && !st.ops.is_empty() && self.changes.ops.is_empty()) else { return };
+        let (mut kept, mut skipped) = (0, 0);
+        let mut made: HashSet<String> = HashSet::new();
+        for op in st.ops {
+            let here = |id: &str, made: &HashSet<String>| made.contains(id) || d.kb.q.contains_key(id);
+            let ok = match &op {
+                edit::Op::Create { id, parent, .. } => {
+                    made.insert(id.clone());
+                    here(parent, &made)
+                }
+                edit::Op::Update { id, before, .. } => here(id, &made) && (made.contains(id) || edit::LineJson::of(&d.kb.line_of(id)).front == before.front),
+                edit::Op::Delete { id, .. } => here(id, &made),
+                edit::Op::Move { id, to, .. } => here(id, &made) && here(&to.0, &made),
+            };
+            if ok {
                 self.changes.apply(&mut d.kb, op);
+                kept += 1;
+            } else {
+                skipped += 1;
             }
-            self.changes.reset_steps();
-            self.changes.next_tmp = self.changes.next_tmp.max(st.next_tmp);
-            self.msg = Some(format!("restored {n} staged {} from last time · :diff to look, :w to commit, :e! to drop", plural(n, "change")));
         }
-        self.staged_disk = Some(String::new());
+        self.changes.reset_steps();
+        self.changes.next_tmp = self.changes.next_tmp.max(st.next_tmp);
+        let skip = if skipped > 0 { format!(" ({skipped} skipped: changed in RemNote since)") } else { String::new() };
+        self.msg = Some(format!("restored {kept} staged {}{skip} · :diff to look, :w to commit, :e! to drop", plural(kept, "change")));
     }
 
     /// Write the staged ops to disk whenever they change (never in previews).
     fn persist_staged(&mut self) {
-        let (Some(last), Some(Ok(d))) = (&self.staged_disk, &self.data) else { return };
-        let st = edit::Staged { db: d.db.clone(), next_tmp: self.changes.next_tmp, ops: self.changes.ops.clone() };
-        let Ok(now) = serde_json::to_string(&st.ops) else { return };
-        if &now != last {
+        let Some((db, last)) = &self.staged_disk else { return };
+        // `version` changes with every op change (and resets with the ops)
+        let now = Some(self.changes.version);
+        // nothing staged yet this session: leave any other db's file alone
+        if last.is_none() && self.changes.ops.is_empty() {
+            self.staged_disk = Some((db.clone(), now));
+            return;
+        }
+        if *last != now {
+            let st = edit::Staged { db: db.clone(), next_tmp: self.changes.next_tmp, ops: self.changes.ops.clone() };
             st.save();
-            self.staged_disk = Some(now);
+            self.staged_disk = Some((db.clone(), now));
         }
     }
 
@@ -1600,7 +1657,6 @@ impl eframe::App for App {
                 }
             }
         }
-        self.persist_staged();
         // don't lose staged edits: closing with changes staged asks first
         if ctx.input(|i| i.viewport().close_requested()) && !self.changes.ops.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -1612,6 +1668,31 @@ impl eframe::App for App {
                 self.finish_commit(out, ops);
             }
             ctx.request_repaint_after(std::time::Duration::from_millis(200));
+        }
+        // after keys, deferred jobs and a finished commit, before any quit
+        self.persist_staged();
+        if !self.grading.is_empty() {
+            let mut failed = 0;
+            self.grading.retain(|rx| match rx.try_recv() {
+                Ok((_, r)) => {
+                    failed += r.is_err() as usize;
+                    false
+                }
+                Err(mpsc::TryRecvError::Empty) => true,
+                Err(_) => false,
+            });
+            if failed > 0 {
+                self.msg = Some(format!("{failed} review {} didn't save to RemNote", plural(failed, "grade")));
+            }
+            ctx.request_repaint_after(std::time::Duration::from_millis(300));
+        }
+        // the open page went away (undo of a new week, a revert): close it
+        if let (Some(w), Some(Ok(d))) = (&self.week, &self.data) {
+            if !d.kb.q.contains_key(w) {
+                self.week = None;
+                self.editing = None;
+                self.visual = None;
+            }
         }
         if self.quit_now {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -1680,7 +1761,7 @@ impl App {
             }
             p.line_segment([r.left_bottom(), r.right_bottom()], (1.0, GREY0));
             if let Some(Ok(d)) = &self.data {
-                let m = self.week.as_ref().and_then(|w| d.kb.q[w].get("parent").and_then(|p| p.as_str())).map(|m| d.kb.name(m));
+                let m = self.week.as_ref().and_then(|w| d.kb.q.get(w)?.get("parent").and_then(|p| p.as_str())).map(|m| d.kb.name(m));
                 let w = self.week.as_ref().map(|w| d.kb.name(w));
                 let crumbs: Vec<String> = [m, w].into_iter().flatten().collect();
                 p.text(Pos2::new(92.0, r.center().y), Align2::LEFT_CENTER, crumbs.join("  /  "), FontId::monospace(13.0), FG_DIM);
@@ -2708,6 +2789,10 @@ impl App {
     /// reviewed in `:diff` and sent with `:w` like any edit. Rems that no longer
     /// match (missing, or `"was"` given and different) are skipped.
     fn stage_file(&mut self, path: &str) {
+        if self.committing.is_some() {
+            self.msg = Some("committing… try again when it's done".into());
+            return;
+        }
         let Some(Ok(d)) = &mut self.data else { return };
         let path = path.strip_prefix("~/").map(|p| kb::home().join(p)).unwrap_or_else(|| path.into());
         let list: Vec<serde_json::Value> = match std::fs::read_to_string(&path).map_err(|e| e.to_string()).and_then(|s| serde_json::from_str(&s).map_err(|e| e.to_string())) {
@@ -2772,7 +2857,7 @@ fn apply_file(path: &str) -> i32 {
         eprintln!("plugin didn't connect");
         return 1;
     }
-    let out = commit::run(&b, &ops, &std::collections::HashMap::new());
+    let out = commit::run(&b, &ops, &std::collections::HashMap::new(), &HashSet::new());
     if out.done > 0 {
         commit::append_log(&ops[..out.done]);
     }
@@ -2848,7 +2933,17 @@ fn rename_ids(kb: &mut Kb, m: &std::collections::HashMap<String, String>) {
     if m.is_empty() {
         return;
     }
-    let touched: Vec<String> = kb.q.iter().filter(|(k, v)| k.starts_with("tmp-") || v.to_string().contains("\"tmp-")).map(|(k, _)| k.clone()).collect();
+    // tmp ids, and old ids of restored (reverted) subtrees
+    let quoted: Vec<String> = m.keys().map(|k| format!("\"{k}\"")).collect();
+    let touched: Vec<String> = kb
+        .q
+        .iter()
+        .filter(|(k, v)| m.contains_key(*k) || {
+            let s = v.to_string();
+            quoted.iter().any(|q| s.contains(q.as_str()))
+        })
+        .map(|(k, _)| k.clone())
+        .collect();
     for k in touched {
         if let Some(v) = kb.q.remove(&k) {
             let nk = m.get(&k).cloned().unwrap_or(k);
@@ -2903,7 +2998,7 @@ fn commit_test(keep: bool) -> i32 {
     ];
     let mut children = std::collections::HashMap::new();
     children.insert("tmp-4".to_string(), vec!["tmp-5".to_string(), "tmp-6".to_string()]);
-    let out = commit::run(&b, &ops, &children);
+    let out = commit::run(&b, &ops, &children, &HashSet::new());
     println!("done {}/{}  err {:?}", out.done, ops.len(), out.err);
     for t in ["tmp-1", "tmp-3", "tmp-4", "tmp-5", "tmp-7", "tmp-8"] {
         if let Some(id) = out.idmap.get(t) {
