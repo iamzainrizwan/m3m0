@@ -63,6 +63,9 @@ pub const HELP: &[Group] = &[
             ("o / O", "new bullet below / above (below = first child if open, or under >>> / >>A) / a heading)"),
             ("dd", "delete bullet and everything under it"),
             ("J", "join the next bullet onto this one (its children come too)"),
+            ("yy / p / P", "yank bullet (and children) · paste below / above (dd cuts)"),
+            ("V", "select bullets: j/k extend · d delete · y yank · > < indent · esc"),
+            (".", "repeat the last change (dd, >>, J, p, alt-hjkl, o + its text)"),
             (">> / <<", "indent / outdent (3>> works)"),
             ("alt-j / alt-k", "move bullet down / up among siblings"),
             ("alt-h / alt-l", "outdent / indent (like << / >>)"),
@@ -73,7 +76,7 @@ pub const HELP: &[Group] = &[
     Group {
         title: "insert mode",
         keys: &[
-            ("esc", "save the bullet, back to normal mode"),
+            ("esc", "text cursor in the line (vim, see line) · esc again saves"),
             ("enter", "save, new bullet below (a child under >>> / >>A) / headings) · mid-line: split"),
             ("enter (empty bullet)", "outdent it one level · at the top level: drop it"),
             ("shift-enter", "newline inside the bullet (code blocks)"),
@@ -87,6 +90,23 @@ pub const HELP: &[Group] = &[
             ("== / ===", "become >> / >>> (backspace right after: literal ==)"),
             (":: ;; >> <> <<", "get a space each side as you type them (backspace: as typed)"),
             ("(never)", "none of this fires inside `code` or $latex$, or on paste"),
+        ],
+    },
+    Group {
+        title: "line (esc in insert: vim in the bullet)",
+        keys: &[
+            ("esc", "first esc: text cursor in the line · second esc: save"),
+            ("h l  w b e  0 ^ $", "move"),
+            ("f t F T + char", "to / just before that char"),
+            ("i a I A", "back to typing (here / after / line start / end)"),
+            ("x  D  C", "delete char · delete to end · change to end"),
+            ("dw cw ciw diw de d$ dt)", "delete / change with a motion or the word"),
+            ("dd / cc / yy", "delete the bullet / clear the line / yank the line"),
+            ("p / P", "paste after / before the cursor"),
+            ("v", "select chars: move, then y d c"),
+            ("V", "save, select bullets (see notes: edit)"),
+            ("o", "new bullet below"),
+            ("j / k", "save, move to the next / previous bullet"),
         ],
     },
     Group {
@@ -224,6 +244,7 @@ pub fn which(prefix: &str, ctx: &str) -> Vec<(&'static str, &'static str)> {
         ("g", _) => vec![("g", "top"), ("d", "go to [[ref]] on this bullet"), ("l", "link to a claude card"), ("r", "review this page's due cards"), ("R", "review this module")],
         ("z", _) => vec![("a", "toggle fold"), ("c", "close fold"), ("o", "open fold"), ("M", "fold all"), ("R", "unfold all")],
         ("d", _) => vec![("d", "delete bullet (and children)")],
+        ("y", _) => vec![("y", "yank bullet (and children)")],
         (">", _) => vec![(">", "indent")],
         ("<", _) => vec![("<", "outdent")],
         (p, _) if p.chars().all(|c| c.is_ascii_digit()) && !p.is_empty() => {
@@ -238,7 +259,10 @@ pub fn hint(ctx: &str) -> &'static str {
     match ctx {
         "tree" => "j/k move · l open · h collapse · </> width · tab notes · ctrl-t find",
         "notes" => "i/a edit · o new · dd del · >> indent · gd ref · / find · ctrl-f cards · ctrl-g graph",
-        "insert" => "esc save · enter new bullet · tab indent · [[ ref · / commands · ctrl-b bold",
+        "line" => "esc save · i/a type · w b e 0 $ move · x dw cw ciw D C · v select · V bullets",
+        "visual" => "move to extend · y yank · d delete · c change · esc back",
+        "vbullets" => "j/k extend · d delete · y yank · > < indent · esc done",
+        "insert" => "esc line cursor · enter new bullet · tab indent · [[ ref · / commands · ctrl-b bold",
         "pdf" => "f follow link · b back · o pick file · j/k scroll · ]/[ file · a answers · h notes",
         "graph" => "hjkl move · tab walk links · / find · enter open · L local · f module · = fit · esc back",
         "cards" => "h/l column · ]/[ gaps · enter open · gl link · s stage",
@@ -253,6 +277,8 @@ pub fn tab_for(ctx: &str) -> usize {
     let want = match ctx {
         "tree" => "tree",
         "insert" => "insert",
+        "line" | "visual" => "line",
+        "vbullets" => "notes: edit",
         "pdf" => "files",
         "graph" => "graph",
         "cards" => "cards",

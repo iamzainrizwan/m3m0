@@ -344,6 +344,103 @@ fn trim_end(b: &mut Buf) {
     b.anchor = b.caret;
 }
 
+
+// --- vim motions inside a line (char indices) --------------------------------
+
+fn class(c: char) -> u8 {
+    if c.is_whitespace() {
+        0
+    } else if c.is_alphanumeric() || c == '_' {
+        1
+    } else {
+        2
+    }
+}
+
+/// `w`: start of the next word.
+pub fn word_fwd(cs: &[char], i: usize) -> usize {
+    let n = cs.len();
+    if i >= n {
+        return n;
+    }
+    let c0 = class(cs[i]);
+    let mut j = i;
+    while j < n && c0 != 0 && class(cs[j]) == c0 {
+        j += 1;
+    }
+    while j < n && class(cs[j]) == 0 {
+        j += 1;
+    }
+    j
+}
+
+/// `b`: start of this / the previous word.
+pub fn word_back(cs: &[char], i: usize) -> usize {
+    let mut j = i.min(cs.len());
+    while j > 0 && class(cs[j - 1]) == 0 {
+        j -= 1;
+    }
+    if j == 0 {
+        return 0;
+    }
+    let c = class(cs[j - 1]);
+    while j > 0 && class(cs[j - 1]) == c {
+        j -= 1;
+    }
+    j
+}
+
+/// `e`: end of this / the next word (moves at least one char).
+pub fn word_end(cs: &[char], i: usize) -> usize {
+    let n = cs.len();
+    let mut j = i + 1;
+    while j < n && class(cs[j]) == 0 {
+        j += 1;
+    }
+    if j >= n {
+        return n.saturating_sub(1);
+    }
+    let c = class(cs[j]);
+    while j + 1 < n && class(cs[j + 1]) == c {
+        j += 1;
+    }
+    j
+}
+
+/// `iw`: the word (or run of spaces / punctuation) under the cursor.
+pub fn inner_word(cs: &[char], i: usize) -> (usize, usize) {
+    let n = cs.len();
+    if n == 0 {
+        return (0, 0);
+    }
+    let i = i.min(n - 1);
+    let c = class(cs[i]);
+    let (mut a, mut z) = (i, i + 1);
+    while a > 0 && class(cs[a - 1]) == c {
+        a -= 1;
+    }
+    while z < n && class(cs[z]) == c {
+        z += 1;
+    }
+    (a, z)
+}
+
+/// `f t F T` + a char.
+pub fn find(cs: &[char], i: usize, kind: char, ch: char) -> Option<usize> {
+    match kind {
+        'f' => (i + 1..cs.len()).find(|&j| cs[j] == ch),
+        't' => (i + 2..cs.len()).find(|&j| cs[j] == ch).map(|j| j - 1),
+        'F' => (0..i).rev().find(|&j| cs[j] == ch),
+        'T' => (0..i.saturating_sub(1)).rev().find(|&j| cs[j] == ch).map(|j| j + 1),
+        _ => None,
+    }
+}
+
+/// First non-blank (`^`, `I`).
+pub fn first_non_blank(cs: &[char]) -> usize {
+    cs.iter().position(|c| !c.is_whitespace()).unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +522,23 @@ mod tests {
         let mut b = Buf::new("see /ref", 8);
         slash_apply(&mut b, 4, slash_matches("ref")[0]);
         assert_eq!(shown(&b), "see [[|]]");
+    }
+
+    #[test]
+    fn motions() {
+        let cs: Vec<char> = "foo bar.baz  qux".chars().collect();
+        assert_eq!(word_fwd(&cs, 0), 4);
+        assert_eq!(word_fwd(&cs, 4), 7);
+        assert_eq!(word_fwd(&cs, 7), 8);
+        assert_eq!(word_fwd(&cs, 8), 13);
+        assert_eq!(word_back(&cs, 13), 8);
+        assert_eq!(word_back(&cs, 5), 4);
+        assert_eq!(word_end(&cs, 0), 2);
+        assert_eq!(word_end(&cs, 2), 6);
+        assert_eq!(inner_word(&cs, 5), (4, 7));
+        assert_eq!(find(&cs, 0, 'f', 'b'), Some(4));
+        assert_eq!(find(&cs, 0, 't', 'b'), Some(3));
+        assert_eq!(find(&cs, 10, 'F', 'b'), Some(8));
+        assert_eq!(find(&cs, 10, 'T', 'b'), Some(9));
     }
 }

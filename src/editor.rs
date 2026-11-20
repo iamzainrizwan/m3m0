@@ -24,6 +24,34 @@ pub struct Editing {
     pub undo: Option<typing::Undo>,
     /// `/` menu: char index of the `/`, highlighted item
     pub slash: Option<(usize, usize)>,
+    /// insert, or vim normal / visual inside the line (esc from insert)
+    pub mode: LineMode,
+    /// pending operator in line-normal mode: d c y, then i / f t F T
+    pub op: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum LineMode {
+    Insert,
+    Normal,
+    /// charwise visual from this anchor
+    Visual(usize),
+}
+
+/// What y / d put away, for p / P.
+#[derive(Clone)]
+pub enum Reg {
+    Text(String),
+    /// whole bullets, root first: (old id, old parent or None for a root, line)
+    Bullets(Vec<(String, Option<String>, LineJson)>),
+}
+
+/// The last change in the notes, for `.`.
+#[derive(Clone)]
+pub enum Repeat {
+    Key(String, K, usize),
+    /// o / O and what was typed into the new bullet
+    Insert(bool, String),
 }
 
 impl Editing {
@@ -75,9 +103,42 @@ impl App {
     /// box keeps arrows, selection, paste, delete and shift-enter.
     pub(super) fn insert_keys(&mut self, ctx: &egui::Context) -> Vec<K> {
         let menu = self.editing.as_ref().is_some_and(|e| e.ac.as_ref().is_some_and(|a| !a.items.is_empty()) || e.slash_items().is_some());
+        let vim = self.editing.as_ref().is_some_and(|e| e.mode != LineMode::Insert);
         let mut out = vec![];
         ctx.input_mut(|i| {
             let mods = i.modifiers;
+            if vim {
+                // vim normal / visual in the line: every key is a command
+                i.events.retain(|e| match e {
+                    egui::Event::Text(t) if !mods.ctrl && !mods.alt => {
+                        out.extend(t.chars().map(K::Ch));
+                        false
+                    }
+                    egui::Event::Key { key, pressed, modifiers, .. } => {
+                        use egui::Key as E;
+                        let k = match key {
+                            E::Escape => Some(K::Esc),
+                            E::Enter => Some(K::Enter),
+                            E::Backspace => Some(K::Back),
+                            E::Tab if modifiers.shift => Some(K::ShiftTab),
+                            E::Tab => Some(K::Tab),
+                            E::ArrowLeft => Some(K::Left),
+                            E::ArrowRight => Some(K::Right),
+                            E::ArrowUp => Some(K::Up),
+                            E::ArrowDown => Some(K::Down),
+                            _ if modifiers.ctrl || modifiers.alt => return true,
+                            _ => None,
+                        };
+                        if let (Some(k), true) = (k, *pressed) {
+                            out.push(k);
+                        }
+                        false
+                    }
+                    egui::Event::Paste(_) | egui::Event::Cut | egui::Event::Copy => false,
+                    _ => true,
+                });
+                return;
+            }
             i.events.retain(|e| {
                 if let egui::Event::Text(t) = e {
                     if !mods.ctrl && !mods.alt {
@@ -124,7 +185,7 @@ impl App {
         let mut side = rich::Side::default();
         let buf = rich::line_to_text(&orig, &|r| d.kb.name(r), &mut side);
         let at = if at_end { buf.chars().count() } else { 0 };
-        self.editing = Some(Editing { id: id.to_owned(), buf, side, orig, fresh: true, created, ac: None, sel: (at, at), push: true, undo: None, slash: None });
+        self.editing = Some(Editing { id: id.to_owned(), buf, side, orig, fresh: true, created, ac: None, sel: (at, at), push: true, undo: None, slash: None, mode: LineMode::Insert, op: String::new() });
         self.focus = Focus::Notes;
     }
 
@@ -132,6 +193,11 @@ impl App {
     /// Returns the rem id, or None if it was a blank new rem that got dropped.
     pub(super) fn finish_edit(&mut self, d: &mut Loaded) -> Option<String> {
         let e = self.editing.take()?;
+        if let Some(above) = self.insert_from.take() {
+            if e.created && !e.buf.trim().is_empty() {
+                self.last_change = Some(Repeat::Insert(above, e.buf.clone()));
+            }
+        }
         if e.created && e.buf.trim().is_empty() {
             self.changes.drop_last(&mut d.kb); // drop the Create
             return None;
@@ -304,6 +370,302 @@ impl App {
         self.cursor_to(d, &cur);
     }
 
+    /// Paste a register below (or above) the cursor bullet, as its sibling.
+    fn paste(&mut self, d: &mut Loaded, cur: Option<&str>, above: bool, r: &Reg) {
+        let Some(page) = self.week.clone() else { return };
+        let (parent, pos) = match cur.and_then(|c| Self::parent_pos(d, c)) {
+            Some((p, i)) => (p, if above { i } else { i + 1 }),
+            None => (page, 0),
+        };
+        let items = match r {
+            Reg::Bullets(b) => b.clone(),
+            Reg::Text(t) => {
+                let side = rich::Side::default();
+                let near = parent.clone();
+                let l = rich::text_to_line(t, &|n| d.kb.resolve(n, Some(&near)), &side, &mut cloze_id);
+                vec![(String::new(), None, LineJson::of(&l))]
+            }
+        };
+        let mut map: std::collections::HashMap<String, String> = Default::default();
+        let mut slots: std::collections::HashMap<String, usize> = Default::default();
+        let mut first = None;
+        let mut roots = 0;
+        self.changes.begin();
+        for (old, op, line) in items {
+            let id = self.changes.tmp_id();
+            let (par, at) = match op.and_then(|p| map.get(&p).cloned()) {
+                Some(np) => {
+                    let s = slots.entry(np.clone()).or_default();
+                    *s += 1;
+                    (np, *s - 1)
+                }
+                None => {
+                    roots += 1;
+                    (parent.clone(), pos + roots - 1)
+                }
+            };
+            self.changes.apply(&mut d.kb, Op::Create { id: id.clone(), parent: par, pos: at, line });
+            map.insert(old, id.clone());
+            first.get_or_insert(id);
+        }
+        self.changes.end();
+        if let Some(f) = first {
+            self.cursor_to(d, &f);
+        }
+    }
+
+    /// `V` on the bullets: j/k extend, d y > < act on every bullet in range.
+    fn visual_key(&mut self, d: &mut Loaded, prefix: &str, k: K, n: usize, rows: &[(String, usize)]) -> bool {
+        let Some(anchor) = self.visual.clone() else { return false };
+        let a = rows.iter().position(|r| r.0 == anchor).unwrap_or(self.note_cur);
+        let (lo, hi) = (a.min(self.note_cur), a.max(self.note_cur));
+        // the selected bullets whose parent isn't selected too (children come along)
+        let sel: Vec<String> = rows[lo..=hi.min(rows.len().saturating_sub(1))].iter().map(|r| r.0.clone()).collect();
+        let tops: Vec<String> = sel
+            .iter()
+            .filter(|id| Self::parent_pos(d, id).is_none_or(|(p, _)| !sel.contains(&p)))
+            .cloned()
+            .collect();
+        match (prefix, k) {
+            (_, K::Esc | K::Ch('V')) => self.visual = None,
+            (_, K::Ch('d' | 'x')) => {
+                self.reg = Some(Reg::Bullets(clip(&d.kb, &tops)));
+                self.changes.begin();
+                for t in &tops {
+                    self.delete(d, t);
+                }
+                self.changes.end();
+                self.visual = None;
+                self.note_cur = lo;
+                self.msg = Some(format!("deleted {} (u to undo)", plural(tops.len(), "bullet")));
+            }
+            (_, K::Ch('y')) => {
+                let c = clip(&d.kb, &tops);
+                self.msg = Some(format!("yanked {}", plural(c.len(), "bullet")));
+                self.reg = Some(Reg::Bullets(c));
+                self.visual = None;
+                self.note_cur = lo;
+            }
+            (_, K::Ch('>' | '<')) => {
+                self.changes.begin();
+                // indent top-down, outdent bottom-up, so siblings keep their order
+                let order: Vec<&String> = if matches!(k, K::Ch('>')) { tops.iter().collect() } else { tops.iter().rev().collect() };
+                for _ in 0..n {
+                    for t in &order {
+                        if matches!(k, K::Ch('>')) {
+                            self.indent(d, t);
+                        } else {
+                            self.outdent(d, t);
+                        }
+                    }
+                }
+                self.changes.end();
+                self.cursor_to(d, &anchor);
+                let rows = note_rows(&d.kb, self.week.as_deref().unwrap_or_default(), &self.folded);
+                let last = sel.last().cloned().unwrap_or_default();
+                self.note_cur = rows.iter().position(|r| r.0 == last).unwrap_or(self.note_cur);
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// vim normal / visual inside the line being edited.
+    fn line_normal(&mut self, d: &mut Loaded, k: K) {
+        let Some(e) = &mut self.editing else { return };
+        let cs: Vec<char> = e.buf.chars().collect();
+        let n = cs.len();
+        let last = n.saturating_sub(1);
+        let caret = e.sel.1.min(last);
+        let op = std::mem::take(&mut e.op);
+        let mode = e.mode;
+        // a range for d / c / y (or the visual selection)
+        let mut range: Option<(usize, usize)> = None;
+        let mut act = op.chars().next().filter(|c| "dcy".contains(*c));
+        let mut to: Option<usize> = None;
+        let pend = op.chars().last();
+        match (pend, k) {
+            (Some(f @ ('f' | 't' | 'F' | 'T')), K::Ch(c)) => {
+                if let Some(j) = typing::find(&cs, caret, f, c) {
+                    if act.is_some() {
+                        range = Some(if "ft".contains(f) { (caret, j + 1) } else { (j, caret) });
+                    } else {
+                        to = Some(j);
+                    }
+                }
+            }
+            (Some('i'), K::Ch('w')) if act.is_some() => range = Some(typing::inner_word(&cs, caret)),
+            (Some('i'), _) => {}
+            (_, K::Ch(c @ ('f' | 't' | 'F' | 'T' | 'i'))) if !op.is_empty() || c != 'i' => {
+                e.op = format!("{op}{c}");
+                return;
+            }
+            (_, K::Ch(c @ ('d' | 'c' | 'y'))) if op.is_empty() && !matches!(mode, LineMode::Visual(_)) => {
+                e.op = c.to_string();
+                return;
+            }
+            (Some(o), K::Ch(c)) if o == c && act.is_some() => {
+                // dd: the whole bullet · cc: clear the line · yy: yank the line
+                match c {
+                    'd' => {
+                        let id = e.id.clone();
+                        self.editing = None;
+                        self.reg = Some(Reg::Bullets(clip(&d.kb, std::slice::from_ref(&id))));
+                        self.delete(d, &id);
+                        return;
+                    }
+                    _ => range = Some((0, n)),
+                }
+            }
+            (_, K::Ch('h') | K::Left | K::Back) => to = Some(caret.saturating_sub(1)),
+            (_, K::Ch('l') | K::Right | K::Ch(' ')) => to = Some((caret + 1).min(if act.is_some() { n } else { last })),
+            // cw changes to the end of the word (vim's quirk)
+            (_, K::Ch('w')) if act == Some('c') => range = Some((caret, typing::inner_word(&cs, caret).1)),
+            (_, K::Ch('w')) => to = Some(typing::word_fwd(&cs, caret)),
+            (_, K::Ch('b')) => to = Some(typing::word_back(&cs, caret)),
+            (_, K::Ch('e')) => to = Some(typing::word_end(&cs, caret)),
+            (_, K::Ch('0')) => to = Some(0),
+            (_, K::Ch('^')) => to = Some(typing::first_non_blank(&cs)),
+            (_, K::Ch('$')) => to = Some(if act.is_some() { n } else { last }),
+            _ => {}
+        }
+        // motion + operator = range (inclusive for e)
+        if let (Some(t), Some(_)) = (to, act) {
+            if range.is_none() {
+                range = Some(if t >= caret {
+                    let incl = matches!(k, K::Ch('e')) || matches!(pend, Some('f' | 't'));
+                    (caret, if incl { (t + 1).min(n) } else { t })
+                } else {
+                    (t, caret)
+                });
+            }
+            to = None;
+        }
+        if let LineMode::Visual(a) = mode {
+            if matches!(k, K::Ch('d' | 'x' | 'c' | 'y')) {
+                range = Some((a.min(caret), (a.max(caret) + 1).min(n)));
+                act = match k {
+                    K::Ch('x') => Some('d'),
+                    K::Ch(c) => Some(c),
+                    _ => None,
+                };
+            }
+        }
+        let e = self.editing.as_mut().unwrap();
+        if let (Some((a, z)), Some(op)) = (range, act) {
+            let (a, z) = (a.min(n), z.min(n));
+            let text: String = cs[a..z].iter().collect();
+            if !text.is_empty() {
+                self.reg = Some(Reg::Text(text));
+            }
+            if op != 'y' && z > a {
+                let mut b = e.buf();
+                b.anchor = a;
+                b.caret = z;
+                typing::backspace(&mut b, &mut None);
+                e.set(b);
+            }
+            let left = e.buf.chars().count();
+            let c = if op == 'c' { a } else { a.min(left.saturating_sub(1)) };
+            e.sel = (c, c);
+            e.push = true;
+            e.mode = if op == 'c' { LineMode::Insert } else { LineMode::Normal };
+            return;
+        }
+        if let Some(t) = to {
+            e.sel = (t, t);
+            e.push = true;
+            return;
+        }
+        let at = |e: &mut Editing, c: usize| {
+            e.sel = (c, c);
+            e.push = true;
+            e.mode = LineMode::Insert;
+        };
+        match k {
+            K::Esc if matches!(mode, LineMode::Visual(_)) => e.mode = LineMode::Normal,
+            K::Esc if !op.is_empty() => {}
+            K::Esc => {
+                if let Some(id) = self.finish_edit(d) {
+                    self.cursor_to(d, &id);
+                }
+            }
+            K::Ch('v') if matches!(mode, LineMode::Visual(_)) => e.mode = LineMode::Normal,
+            K::Ch('v') if n > 0 => e.mode = LineMode::Visual(caret),
+            K::Ch('i') => at(e, caret),
+            K::Ch('a') => at(e, (caret + 1).min(n)),
+            K::Ch('I') => at(e, typing::first_non_blank(&cs)),
+            K::Ch('A') => at(e, n),
+            K::Ch('x') if n > 0 => {
+                self.reg = Some(Reg::Text(cs[caret].to_string()));
+                let mut b = e.buf();
+                b.anchor = caret;
+                b.caret = caret + 1;
+                typing::backspace(&mut b, &mut None);
+                let c = caret.min(b.text.chars().count().saturating_sub(1));
+                e.set(b);
+                e.sel = (c, c);
+            }
+            K::Ch('D' | 'C') => {
+                self.reg = Some(Reg::Text(cs[caret.min(n)..].iter().collect()));
+                let mut b = e.buf();
+                b.anchor = caret.min(n);
+                b.caret = n;
+                typing::backspace(&mut b, &mut None);
+                e.set(b);
+                if matches!(k, K::Ch('C')) {
+                    at(e, caret.min(n));
+                } else {
+                    let c = caret.saturating_sub(1);
+                    e.sel = (c, c);
+                }
+            }
+            K::Ch('p' | 'P') => {
+                let t = match &self.reg {
+                    Some(Reg::Text(t)) => t.clone(),
+                    Some(Reg::Bullets(b)) => b.iter().filter(|x| x.1.is_none()).map(|x| rich::plain(&x.2.line().front, &|r| d.kb.name(r))).collect::<Vec<_>>().join(" "),
+                    None => return,
+                };
+                let c = if matches!(k, K::Ch('p')) && n > 0 { caret + 1 } else { caret };
+                let mut b = e.buf();
+                b.anchor = c;
+                b.caret = c;
+                for ch in t.chars() {
+                    // pasted text goes in as is, no auto-anything
+                    let at = b.caret;
+                    let mut v: Vec<char> = b.text.chars().collect();
+                    v.insert(at, ch);
+                    b.text = v.into_iter().collect();
+                    b.caret += 1;
+                }
+                let end = b.caret.saturating_sub(1);
+                e.set(b);
+                e.sel = (end, end);
+            }
+            K::Ch('o') => {
+                e.sel = (n, n);
+                e.mode = LineMode::Insert;
+                self.enter(d);
+            }
+            K::Ch('V') => {
+                if let Some(id) = self.finish_edit(d) {
+                    self.cursor_to(d, &id);
+                    self.visual = Some(id);
+                }
+            }
+            K::Ch('j' | 'k') | K::Up | K::Down | K::Enter => {
+                if let Some(id) = self.finish_edit(d) {
+                    self.cursor_to(d, &id);
+                    let page = self.week.clone().unwrap_or_default();
+                    let len = note_rows(&d.kb, &page, &self.folded).len();
+                    let by = if matches!(k, K::Ch('k') | K::Up) { -1 } else { 1 };
+                    self.note_cur = (self.note_cur as isize + by).clamp(0, len as isize - 1) as usize;
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn parent_pos(d: &Loaded, id: &str) -> Option<(String, usize)> {
         let p = d.kb.q.get(id)?.get("parent")?.as_str()?.to_owned();
         let pos = d.kb.children(Some(&p)).iter().position(|k| k == id)?;
@@ -406,19 +768,78 @@ impl App {
             return false;
         }
         let cur = rows.get(self.note_cur).map(|r| r.0.clone());
+        if self.visual.is_some() {
+            return self.visual_key(d, prefix, k, n, rows);
+        }
+        let repeatable = matches!(
+            (prefix, k),
+            ("d", K::Ch('d')) | (">", K::Ch('>')) | ("<", K::Ch('<')) | ("", K::Alt('h' | 'j' | 'k' | 'l')) | ("", K::Ch('J' | 'p' | 'P'))
+        );
+        if repeatable {
+            self.last_change = Some(Repeat::Key(prefix.to_owned(), k, n));
+        }
         match (prefix, k) {
+            ("", K::Ch('.')) => {
+                let Some(r) = self.last_change.clone() else {
+                    self.msg = Some("nothing to repeat".into());
+                    return true;
+                };
+                match r {
+                    Repeat::Key(p, k, m) => {
+                        let rows = note_rows(&d.kb, self.week.as_deref().unwrap_or_default(), &self.folded);
+                        let times = if n > 1 { n } else { m };
+                        self.edit_key(d, &p, k, times, &rows);
+                    }
+                    Repeat::Insert(above, text) => {
+                        if let Some(id) = self.new_rem(d, cur.as_deref(), above) {
+                            self.start_edit(d, &id, true, true);
+                            if let Some(e) = &mut self.editing {
+                                e.buf = text.clone();
+                            }
+                            self.finish_edit(d);
+                            self.cursor_to(d, &id);
+                            self.last_change = Some(Repeat::Insert(above, text));
+                        }
+                    }
+                }
+            }
+            ("y", K::Ch('y')) => {
+                if let Some(c) = cur {
+                    let clip = clip(&d.kb, &[c]);
+                    self.msg = Some(format!("yanked {}", plural(clip.len(), "bullet")));
+                    self.reg = Some(Reg::Bullets(clip));
+                }
+            }
+            ("", K::Ch('y')) => self.pending.push('y'),
+            ("", K::Ch('p' | 'P')) => {
+                if let Some(r) = self.reg.clone() {
+                    for _ in 0..n {
+                        self.paste(d, cur.as_deref(), matches!(k, K::Ch('P')), &r);
+                    }
+                } else {
+                    self.msg = Some("nothing yanked".into());
+                }
+            }
+            ("", K::Ch('V')) => {
+                if let Some(c) = cur {
+                    self.visual = Some(c);
+                }
+            }
             ("", K::Ch('i' | 'I')) | ("", K::Ch('a' | 'A')) if cur.is_some() => {
                 let end = matches!(k, K::Ch('a' | 'A'));
                 self.start_edit(d, cur.as_deref().unwrap(), end, false);
             }
             // o / O; and i / a on an empty page start its first bullet
             ("", K::Ch('o' | 'O' | 'i' | 'I' | 'a' | 'A')) => {
-                if let Some(id) = self.new_rem(d, cur.as_deref(), matches!(k, K::Ch('O'))) {
+                let above = matches!(k, K::Ch('O'));
+                if let Some(id) = self.new_rem(d, cur.as_deref(), above) {
                     self.start_edit(d, &id, true, true);
+                    self.insert_from = Some(above);
                 }
             }
             ("d", K::Ch('d')) => {
                 if let Some(c) = cur {
+                    self.reg = Some(Reg::Bullets(clip(&d.kb, std::slice::from_ref(&c))));
                     self.delete(d, &c);
                 }
             }
@@ -487,6 +908,10 @@ impl App {
     }
 
     pub(super) fn handle_insert(&mut self, d: &mut Loaded, k: K) {
+        if self.editing.as_ref().is_some_and(|e| e.mode != LineMode::Insert) {
+            self.line_normal(d, k);
+            return;
+        }
         // autocomplete navigation / accept
         if let Some(e) = &mut self.editing {
             if let Some(ac) = &mut e.ac {
@@ -592,8 +1017,15 @@ impl App {
                 }
             }
             K::Esc => {
-                if let Some(id) = self.finish_edit(d) {
-                    self.cursor_to(d, &id);
+                // esc stops at a text cursor in the line first (vim normal)
+                if let Some(e) = &mut self.editing {
+                    e.mode = LineMode::Normal;
+                    e.slash = None;
+                    e.ac = None;
+                    e.undo = None;
+                    let c = e.sel.1.saturating_sub(1);
+                    e.sel = (c, c);
+                    e.push = true;
                 }
             }
             K::Enter => self.enter(d),
@@ -657,6 +1089,9 @@ pub fn edit_bullet(ui: &mut egui::Ui) {
 /// The text box for the bullet being edited, plus the [[ autocomplete popup.
 pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb) {
     let id = egui::Id::new(EDIT_ID);
+    if e.mode != LineMode::Insert {
+        ui.visuals_mut().text_cursor.stroke.color = Color32::TRANSPARENT;
+    }
     let out = egui::TextEdit::multiline(&mut e.buf)
         .id(id)
         .font(FontId::monospace(NOTE_TEXT))
@@ -668,6 +1103,36 @@ pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb) {
         .lock_focus(true)
         .show(ui);
     let n = e.buf.chars().count();
+    if e.mode != LineMode::Insert {
+        // vim normal / visual: we own the caret; the box only shows it
+        if out.response.clicked() {
+            if let Some(r) = out.cursor_range {
+                let c = r.primary.ccursor.index.min(n.saturating_sub(1));
+                e.sel = (c, c);
+            }
+        }
+        let c = e.sel.1.min(n.saturating_sub(1));
+        let (a, z) = match e.mode {
+            LineMode::Visual(a) => (a.min(c), (a.max(c) + 1).min(n)),
+            _ => (c, c),
+        };
+        let mut st = out.state.clone();
+        st.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(a), CCursor::new(z))));
+        st.store(ui.ctx(), id);
+        e.push = false;
+        e.fresh = false;
+        if e.mode == LineMode::Normal {
+            let at = |i: usize| out.galley.pos_from_ccursor(CCursor::new(i)).translate(out.galley_pos.to_vec2());
+            let r = at(c);
+            let nx = at(c + 1);
+            let w = if c < n && (nx.min.y - r.min.y).abs() < 1.0 && nx.min.x > r.min.x { nx.min.x - r.min.x } else { NOTE_TEXT * 0.6 };
+            ui.painter().rect_filled(Rect::from_min_size(r.min, Vec2::new(w, r.height())), 0.0, RED_CURSOR.gamma_multiply(0.55));
+        }
+        if !out.response.has_focus() {
+            out.response.request_focus();
+        }
+        return;
+    }
     if e.push {
         e.push = false;
         e.fresh = false;
@@ -751,6 +1216,18 @@ pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb) {
             });
         }
     }
+}
+
+/// Bullets (with everything under them) as register items, root first.
+fn clip(kb: &Kb, ids: &[String]) -> Vec<(String, Option<String>, LineJson)> {
+    let mut out = vec![];
+    for id in ids {
+        for (i, k) in edit::subtree(kb, id).into_iter().enumerate() {
+            let parent = if i == 0 { None } else { kb.q.get(&k).and_then(|x| x.get("parent")).and_then(|p| p.as_str()).map(str::to_owned) };
+            out.push((k.clone(), parent, LineJson::of(&kb.line_of(&k))));
+        }
+    }
+    out
 }
 
 /// Bullets whose new bullet (enter at the end, `o`) goes in as their first

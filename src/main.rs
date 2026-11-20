@@ -200,6 +200,13 @@ struct App {
     links: std::collections::HashMap<String, String>,
     /// staged ops as last written to disk (edit::Staged); None until restored
     staged_disk: Option<String>,
+    /// y / d register (bullets or text)
+    reg: Option<editor::Reg>,
+    /// V over bullets: the anchor bullet
+    visual: Option<String>,
+    last_change: Option<editor::Repeat>,
+    /// the bullet being typed came from o (false) / O (true), for `.`
+    insert_from: Option<bool>,
 }
 
 fn load(db: Option<PathBuf>) -> Result<Loaded, String> {
@@ -331,6 +338,10 @@ impl App {
             last_search: None,
             links: deck::load_links(),
             staged_disk: None,
+            reg: None,
+            visual: None,
+            last_change: None,
+            insert_from: None,
         }
     }
 
@@ -1629,6 +1640,9 @@ impl App {
             // the pill names what the keys drive right now (same source as the hint)
             let (mode, col) = match self.context() {
                 "insert" => (" INSERT ", RED_BRIGHT),
+                "line" => (" LINE ", RED_BRIGHT),
+                "visual" => (" VISUAL ", RED_BRIGHT),
+                "vbullets" => (" V-LINE ", RED_BRIGHT),
                 "tree" => (" TREE ", RED),
                 "pdf" => (" FILES ", RED),
                 "chat" => (" CHAT ", RED_BRIGHT),
@@ -1987,6 +2001,8 @@ impl App {
                 let rows = note_rows(&d.kb, &w, &self.folded);
                 self.note_cur = self.note_cur.min(rows.len().saturating_sub(1));
                 let mut clicked_ref: Option<String> = None;
+                // V over bullets: the selected row range
+                let vis = self.visual.as_ref().and_then(|a| rows.iter().position(|r| &r.0 == a)).map(|a| (a.min(self.note_cur), a.max(self.note_cur)));
                 let mut editing = self.editing.take();
                 egui::ScrollArea::vertical().auto_shrink(false).show(ui, |ui| {
                     let width = (ui.available_width() - 12.0).min(MEASURE);
@@ -2008,7 +2024,8 @@ impl App {
                                 }
                                 let math = &mut self.math;
                                 let mut refs = vec![];
-                                let resp = row(ui, ("n", id), sel, focused, *depth as f32 * 22.0, |ui| {
+                                let marked = vis.is_some_and(|(a, b)| i >= a && i <= b);
+                                let resp = row_ext(ui, ("n", id), sel, focused, *depth as f32 * 22.0, marked, |ui| {
                                     if let Some(e) = editing.as_mut().filter(|e| &e.id == id) {
                                         // keep the bullet (red) so the line doesn't jump; headings have none
                                         if heading.is_none() {
@@ -2102,8 +2119,14 @@ impl App {
     }
 
     fn context(&self) -> &'static str {
-        if self.editing.is_some() {
-            "insert"
+        if let Some(e) = &self.editing {
+            match e.mode {
+                editor::LineMode::Insert => "insert",
+                editor::LineMode::Normal => "line",
+                editor::LineMode::Visual(_) => "visual",
+            }
+        } else if self.visual.is_some() && self.focus == Focus::Notes {
+            "vbullets"
         } else if self.focus == Focus::Tree {
             "tree"
         } else if self.focus == Focus::Pdf {
@@ -2385,7 +2408,12 @@ impl App {
 /// A full-width selectable row. The cursor row gets a highlight and a red left edge
 /// (dim when its pane isn't focused).
 fn row(ui: &mut egui::Ui, id: impl std::hash::Hash, sel: bool, focused: bool, indent: f32, add: impl FnOnce(&mut egui::Ui)) -> egui::Response {
-    let fill = match (sel, focused) {
+    row_ext(ui, id, sel, focused, indent, false, add)
+}
+
+/// `row`, plus `marked` for bullets inside a V selection.
+fn row_ext(ui: &mut egui::Ui, id: impl std::hash::Hash, sel: bool, focused: bool, indent: f32, marked: bool, add: impl FnOnce(&mut egui::Ui)) -> egui::Response {
+    let fill = match (sel || marked, focused) {
         (true, true) => SELECTION,
         (true, false) => BG_ALT,
         _ => Color32::TRANSPARENT,
