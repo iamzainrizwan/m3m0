@@ -49,8 +49,12 @@ table: `docs/bridge.md`. Review grades go the same way (`review` op).
   `m3m0 roundtrip` must report 0 differ over the whole DB)
 - `src/render.rs`: own line layout (per-row baselines), inline KaTeX, refs
 - `src/math.rs`: RaTeX -> texture cache (KaTeX fonts, 1.21em, baseline-aligned)
-- `src/edit.rs`: staged ops (Create/Update/Delete/Move), undo/redo
-- `src/editor.rs`: insert mode, structure ops, `[[` autocomplete
+- `src/edit.rs`: staged ops (Create/Update/Delete/Move), undo/redo (groups
+  = one `u`), staged ops saved to `~/.local/state/m3m0/staged.json`
+- `src/editor.rs`: insert mode, vim inside the line (esc), V over bullets,
+  registers (yy/dd/p), `.`, split/join, structure ops, `[[` / `/` menus
+- `src/typing.rs`: what typed keys do (auto-pairs, `==`, marker spacing,
+  format keys, `/` commands, line motions); pure functions with tests
 - `src/commit.rs`: ops -> bridge calls, tmp id mapping, commit log
 - `src/bridge.rs`: plugin HTTP server + websocket worker, RemNote launch/stop
 - `src/pdf.rs`: week files pane: file discovery (`week_files`), hayro PDF
@@ -87,7 +91,7 @@ cd plugin && npm run check-types               # tsc
 
 Dev env vars: `M3M0_DB` (db path), `M3M0_OPEN="FC2/Week 8"` (open a week),
 `M3M0_KEYS` (replay keys after boot; `~b` = ctrl-b, newline = enter,
-`\x1b` = esc, `|` = pause ~0.6 s so the UI can draw before the next keys),
+`\x1b` = esc, `\x08` = backspace, `|` = pause ~0.6 s so the UI can draw before the next keys),
 `M3M0_SHOTS=DIR` (save frames at fixed times, then quit; real keys ignored),
 `M3M0_DEBUG` (log keys), `M3M0_PLUGIN_DIST`.
 
