@@ -456,6 +456,10 @@ impl App {
     /// `V` on the bullets: j/k extend, d y > < act on every bullet in range.
     fn visual_key(&mut self, d: &mut Loaded, prefix: &str, k: K, n: usize, rows: &[(String, usize)]) -> bool {
         let Some(anchor) = self.visual.clone() else { return false };
+        if rows.is_empty() {
+            self.visual = None;
+            return false;
+        }
         let a = rows.iter().position(|r| r.0 == anchor).unwrap_or(self.note_cur);
         let (lo, hi) = (a.min(self.note_cur), a.max(self.note_cur));
         // the selected bullets whose parent isn't selected too (children come along)

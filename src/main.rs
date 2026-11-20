@@ -30,6 +30,22 @@ use std::sync::mpsc;
 use theme::*;
 
 fn main() -> eframe::Result {
+    // launched from the app grid there's no terminal: keep crash reports on disk
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let p = kb::home().join(".local/state/m3m0/crash.log");
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let bt = std::backtrace::Backtrace::force_capture();
+        let entry = format!("--- {t} {}\n{info}\n{bt}\n", env!("CARGO_PKG_VERSION"));
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+            let _ = f.write_all(entry.as_bytes());
+        }
+        default_hook(info);
+    }));
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("commit-test") {
         std::process::exit(commit_test(args.iter().any(|a| a == "--keep")));
