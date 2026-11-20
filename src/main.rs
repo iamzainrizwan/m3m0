@@ -2991,6 +2991,8 @@ fn commit_test(keep: bool) -> i32 {
         Op::Create { id: "tmp-5".into(), parent: "tmp-4".into(), pos: 0, line: LineJson { list: Some(true), ..lj("item one") } },
         Op::Create { id: "tmp-6".into(), parent: "tmp-4".into(), pos: 1, line: LineJson { list: Some(true), ..lj("item two") } },
         Op::Update { id: "tmp-4".into(), before: lj("D list"), after: lj("D list >>>") },
+        // a new item under the (now) >>> card: tagged at create
+        Op::Create { id: "tmp-9".into(), parent: "tmp-4".into(), pos: 2, line: lj("item three") },
         Op::Create { id: "tmp-7".into(), parent: root.clone(), pos: 4, line: lj("## a heading") },
         Op::Delete { id: "tmp-2".into(), parent: root.clone(), pos: 2, docs: vec![] },
         // [[A|ay]]: creates an alias of A and refers through it (twice: reused)
@@ -2998,9 +3000,9 @@ fn commit_test(keep: bool) -> i32 {
     ];
     let mut children = std::collections::HashMap::new();
     children.insert("tmp-4".to_string(), vec!["tmp-5".to_string(), "tmp-6".to_string()]);
-    let out = commit::run(&b, &ops, &children, &HashSet::new());
+    let out = commit::run(&b, &ops, &children, &HashSet::from(["tmp-9".to_string()]));
     println!("done {}/{}  err {:?}", out.done, ops.len(), out.err);
-    for t in ["tmp-1", "tmp-3", "tmp-4", "tmp-5", "tmp-7", "tmp-8"] {
+    for t in ["tmp-1", "tmp-3", "tmp-4", "tmp-5", "tmp-7", "tmp-8", "tmp-9"] {
         if let Some(id) = out.idmap.get(t) {
             match b.call("get", json!({"rem": id})) {
                 Ok(g) => println!("  {t} {id}: type={} parent={} text={} back={} cards={}", g["type"], g["parent"], g["text"], g["back"], g["cards"].as_array().map_or(0, |c| c.len())),
