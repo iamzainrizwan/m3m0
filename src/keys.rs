@@ -60,8 +60,9 @@ pub const HELP: &[Group] = &[
         keys: &[
             ("i / I", "edit bullet, cursor at start (empty page: first bullet)"),
             ("a / A", "edit bullet, cursor at end"),
-            ("o / O", "new bullet below / above (below = first child if open)"),
+            ("o / O", "new bullet below / above (below = first child if open, or under >>> / >>A) / a heading)"),
             ("dd", "delete bullet and everything under it"),
+            ("J", "join the next bullet onto this one (its children come too)"),
             (">> / <<", "indent / outdent (3>> works)"),
             ("alt-j / alt-k", "move bullet down / up among siblings"),
             ("alt-h / alt-l", "outdent / indent (like << / >>)"),
@@ -73,7 +74,8 @@ pub const HELP: &[Group] = &[
         title: "insert mode",
         keys: &[
             ("esc", "save the bullet, back to normal mode"),
-            ("enter", "save, new bullet below"),
+            ("enter", "save, new bullet below (a child under >>> / >>A) / headings) · mid-line: split"),
+            ("enter (empty bullet)", "outdent it one level · at the top level: drop it"),
             ("shift-enter", "newline inside the bullet (code blocks)"),
             ("tab / s-tab", "save and indent / outdent, keep editing"),
             ("backspace (empty)", "delete the bullet, edit the one above"),

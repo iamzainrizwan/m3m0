@@ -192,6 +192,118 @@ impl App {
         true
     }
 
+    /// Enter in insert mode. Empty bullet: outdent it (at the top level: drop
+    /// it and leave insert). Caret mid-line: split, the rest goes to a new
+    /// bullet. At the end: a new bullet (a child under >>> / >>A) / headings).
+    fn enter(&mut self, d: &mut Loaded) {
+        let Some(e) = &self.editing else { return };
+        let id = e.id.clone();
+        if e.buf.trim().is_empty() && d.kb.children(Some(&id)).is_empty() {
+            let top = Self::parent_pos(d, &id).is_none_or(|(p, _)| Some(&p) == self.week.as_ref());
+            if !top {
+                if !self.move_created(d, false) {
+                    if let Some(id) = self.finish_edit(d) {
+                        self.outdent(d, &id);
+                        self.start_edit(d, &id, true, false);
+                    }
+                }
+                return;
+            }
+            let created = e.created;
+            let page = self.week.clone().unwrap_or_default();
+            let rows = note_rows(&d.kb, &page, &self.folded);
+            let i = rows.iter().position(|r| r.0 == id).unwrap_or(0);
+            self.editing = None;
+            if created {
+                self.changes.drop_last(&mut d.kb);
+            } else {
+                self.delete(d, &id);
+            }
+            if let Some(prev) = i.checked_sub(1).and_then(|i| rows.get(i)) {
+                let prev = prev.0.clone();
+                self.cursor_to(d, &prev);
+            }
+            return;
+        }
+        let (lo, hi) = (e.sel.0.min(e.sel.1), e.sel.0.max(e.sel.1));
+        let n = e.buf.chars().count();
+        if hi < n && lo > 0 {
+            // split: this bullet keeps the text before the caret
+            let rest: String = e.buf.chars().skip(hi).collect();
+            let keep: String = e.buf.chars().take(lo).collect();
+            let side = e.side.clone();
+            if let Some(e) = &mut self.editing {
+                e.buf = keep.trim_end().to_owned();
+            }
+            self.changes.begin();
+            let id = self.finish_edit(d);
+            let new = id.and_then(|id| self.new_rem(d, Some(&id), false));
+            self.changes.end();
+            if let Some(nid) = new {
+                self.start_edit(d, &nid, false, true);
+                if let Some(e) = &mut self.editing {
+                    e.buf = rest.trim_start().to_owned();
+                    e.side = side;
+                    e.sel = (0, 0);
+                }
+            }
+            return;
+        }
+        if let Some(id) = self.finish_edit(d) {
+            if let Some(n) = self.new_rem(d, Some(&id), false) {
+                self.start_edit(d, &n, true, true);
+            }
+        }
+    }
+
+    /// `J`: append the next bullet's text to this one (its children move over).
+    fn join(&mut self, d: &mut Loaded, rows: &[(String, usize)]) {
+        let i = self.note_cur;
+        let (Some((cur, _)), Some((next, _))) = (rows.get(i).cloned(), rows.get(i + 1).cloned()) else {
+            self.msg = Some("nothing below to join".into());
+            return;
+        };
+        let (a, b) = (d.kb.line_of(&cur), d.kb.line_of(&next));
+        if a.kind == rich::Kind::Code || b.kind == rich::Kind::Code {
+            self.msg = Some("can't join code blocks".into());
+            return;
+        }
+        let sp = rich::Span::Text { t: " ".into(), b: false, i: false, u: false, code: false, cloze: None, extra: Default::default() };
+        let mut l = a.clone();
+        let tail = b.front.clone();
+        if a.back.is_empty() && matches!(a.kind, rich::Kind::Plain | rich::Kind::Heading(_)) {
+            l.front.push(sp.clone());
+            l.front.extend(tail);
+            if b.kind != rich::Kind::Plain {
+                l.kind = if matches!(b.kind, rich::Kind::Heading(_)) { a.kind } else { b.kind };
+                l.back = b.back.clone();
+            }
+        } else {
+            if !l.back.is_empty() {
+                l.back.push(sp.clone());
+            }
+            l.back.extend(tail);
+            if !b.back.is_empty() {
+                l.back.push(sp);
+                l.back.extend(b.back.iter().cloned());
+            }
+        }
+        let kids = d.kb.children(Some(&next)).to_vec();
+        let base = match Self::parent_pos(d, &next) {
+            Some((p, pos)) if p == cur => pos,
+            _ => d.kb.children(Some(&cur)).len(),
+        };
+        self.changes.begin();
+        for (j, k) in kids.iter().enumerate() {
+            let from = (next.clone(), 0);
+            self.changes.apply(&mut d.kb, Op::Move { id: k.clone(), from, to: (cur.clone(), base + j) });
+        }
+        self.changes.apply(&mut d.kb, Op::Update { id: cur.clone(), before: LineJson::of(&a), after: LineJson::of(&l) });
+        self.delete(d, &next);
+        self.changes.end();
+        self.cursor_to(d, &cur);
+    }
+
     fn parent_pos(d: &Loaded, id: &str) -> Option<(String, usize)> {
         let p = d.kb.q.get(id)?.get("parent")?.as_str()?.to_owned();
         let pos = d.kb.children(Some(&p)).iter().position(|k| k == id)?;
@@ -217,7 +329,8 @@ impl App {
         }
     }
 
-    /// New empty rem after `after` (as its first child if it has visible children),
+    /// New empty rem after `after` (as its first child if it has visible children
+    /// or is a >>> / >>A) card or a heading, see `nests`),
     /// or before it with `above`; at the top of the page if there's no cursor row.
     fn new_rem(&mut self, d: &mut Loaded, after: Option<&str>, above: bool) -> Option<String> {
         let page = self.week.clone()?;
@@ -225,7 +338,8 @@ impl App {
             None => (page, 0),
             Some(a) => {
                 let has_open_kids = !d.kb.children(Some(a)).is_empty() && !self.folded.contains(a);
-                if !above && has_open_kids {
+                if !above && (has_open_kids || nests(&d.kb, a)) {
+                    self.folded.remove(a);
                     (a.to_owned(), 0)
                 } else {
                     let (p, i) = Self::parent_pos(d, a)?;
@@ -325,6 +439,12 @@ impl App {
             }
             ("", K::Ch('>')) => self.pending.push('>'),
             ("", K::Ch('<')) => self.pending.push('<'),
+            ("", K::Ch('J')) => {
+                for _ in 0..n {
+                    let rows = note_rows(&d.kb, self.week.as_deref().unwrap_or_default(), &self.folded);
+                    self.join(d, &rows);
+                }
+            }
             ("", K::Alt('l' | 'h')) => {
                 if let Some(c) = cur {
                     for _ in 0..n {
@@ -476,13 +596,7 @@ impl App {
                     self.cursor_to(d, &id);
                 }
             }
-            K::Enter => {
-                if let Some(id) = self.finish_edit(d) {
-                    if let Some(n) = self.new_rem(d, Some(&id), false) {
-                        self.start_edit(d, &n, true, true);
-                    }
-                }
-            }
+            K::Enter => self.enter(d),
             K::Tab | K::ShiftTab => {
                 // a fresh bullet: move it by re-staging its Create (saving it would drop it if empty)
                 if self.move_created(d, matches!(k, K::Tab)) {
@@ -637,6 +751,12 @@ pub fn edit_ui(ui: &mut egui::Ui, e: &mut Editing, kb: &Kb) {
             });
         }
     }
+}
+
+/// Bullets whose new bullet (enter at the end, `o`) goes in as their first
+/// child: >>> and >>A) cards (the children are the answer) and headings.
+fn nests(kb: &Kb, id: &str) -> bool {
+    matches!(kb.line_of(id).kind, rich::Kind::MultiLine | rich::Kind::Mcq | rich::Kind::Heading(_))
 }
 
 /// Where a popup of `n` rows goes: under the edit box, or above it when it
