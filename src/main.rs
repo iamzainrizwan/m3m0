@@ -2073,7 +2073,7 @@ impl App {
                 }
                 sa.show(ui, |ui| {
                     if chat.msgs.is_empty() {
-                        ui.label(RichText::new("ask about this week: claude sees the page you're on and the module's slides, PDFs and decks.\nenter send · shift-enter newline · ctrl-n new chat · esc back to notes").color(COMMENT).size(12.5));
+                        ui.label(RichText::new("ask about this week: claude sees the page you're on and the module's slides, pdfs and decks. ga on a bullet quotes it here.").color(COMMENT).size(12.5));
                     }
                     for m in &chat.msgs {
                         ui.add_space(8.0);
@@ -2374,16 +2374,19 @@ impl App {
             return;
         }
         let screen = ctx.screen_rect();
-        let h = 34.0 + items.len() as f32 * 20.0;
-        let at = Pos2::new(screen.right() - 380.0, screen.bottom() - STATUS_H - h - 12.0);
-        egui::Area::new(egui::Id::new("which")).order(egui::Order::Foreground).fixed_pos(at).show(ctx, |ui| {
+        // hug the content: key column as wide as the longest key
+        let kw = items.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(1) as f32 * 13.0 * 0.6 + 14.0;
+        let dw = items.iter().map(|(_, w)| w.chars().count()).max().unwrap_or(1) as f32 * 13.0 * 0.6;
+        let width = (kw + dw + 12.0).max(120.0);
+        let at = Pos2::new(screen.right() - width - 32.0, screen.bottom() - STATUS_H - 12.0);
+        egui::Area::new(egui::Id::new("which")).order(egui::Order::Foreground).pivot(Align2::LEFT_BOTTOM).fixed_pos(at).show(ctx, |ui| {
             egui::Frame::new().fill(BG_ALT).stroke((1.0, GREY1)).inner_margin(10.0).show(ui, |ui| {
-                ui.set_width(350.0);
+                ui.set_width(width);
                 ui.label(RichText::new(format!("{}…", self.pending)).color(RED_BRIGHT).family(bold()).size(13.0));
                 for (k, what) in items {
                     ui.horizontal(|ui| {
-                        ui.allocate_ui_with_layout(Vec2::new(90.0, 18.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                            ui.set_width(90.0);
+                        ui.allocate_ui_with_layout(Vec2::new(kw, 18.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                            ui.set_width(kw);
                             ui.label(RichText::new(k).color(FG_BRIGHT).size(13.0));
                         });
                         ui.label(RichText::new(what).color(FG_DIM).size(13.0));
@@ -2557,9 +2560,18 @@ impl App {
                     ui.add_space(6.0);
                     ui.spacing_mut().item_spacing.y = 0.0;
                     for (i, (_, label)) in items.iter().enumerate() {
-                        row(ui, ("find", i), i == cur, true, 0.0, |ui| {
-                            ui.add(egui::Label::new(RichText::new(label).size(14.0).color(if i == cur { FG_BRIGHT } else { FG_DIM })).truncate());
+                        // name on the left, where it lives in a right-aligned column
+                        let (name, tag) = label.split_once("   · ").unwrap_or((label.as_str(), ""));
+                        let r = row(ui, ("find", i), i == cur, true, 0.0, |ui| {
+                            let w = (ui.available_width() - if tag.is_empty() { 0.0 } else { 90.0 }).max(60.0);
+                            ui.allocate_ui_with_layout(Vec2::new(w, 20.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                ui.set_width(w);
+                                ui.add(egui::Label::new(RichText::new(name).size(14.0).color(if i == cur { FG_BRIGHT } else { FG_DIM })).truncate());
+                            });
                         });
+                        if !tag.is_empty() {
+                            ui.painter().text(r.rect.right_center() - Vec2::new(10.0, 0.0), Align2::RIGHT_CENTER, tag, FontId::monospace(12.0), if i == cur { RED } else { COMMENT });
+                        }
                     }
                     if items.is_empty() {
                         ui.label(RichText::new(if q.is_empty() { "type a week, module or rem name" } else { "no matches" }).color(COMMENT));
