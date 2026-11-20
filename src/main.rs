@@ -9,6 +9,7 @@ mod edit;
 mod files;
 mod editor;
 mod icon;
+mod inhibit;
 mod kb;
 mod graph;
 mod keys;
@@ -231,6 +232,8 @@ struct App {
     due: (f64, std::collections::HashMap<String, usize>),
     /// cards graded this session (the snapshot doesn't know yet)
     graded: HashSet<String>,
+    /// GNOME logout inhibitor, held while anything is uncommitted
+    inhibit: inhibit::Inhibit,
     /// grades still in flight after leaving review
     grading: Vec<mpsc::Receiver<(String, Result<serde_json::Value, String>)>>,
 }
@@ -371,6 +374,7 @@ impl App {
             due: (f64::NEG_INFINITY, Default::default()),
             graded: HashSet::new(),
             grading: vec![],
+            inhibit: inhibit::Inhibit::default(),
         }
     }
 
@@ -1677,10 +1681,22 @@ impl eframe::App for App {
                 }
             }
         }
-        // don't lose staged edits: closing with changes staged asks first
-        if ctx.input(|i| i.viewport().close_requested()) && !self.changes.ops.is_empty() {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.msg = Some(format!("{} staged {}: :w to commit, :wq to commit and quit, :q! to quit and drop them", self.changes.ops.len(), plural(self.changes.ops.len(), "change")));
+        // don't lose edits: closing with anything uncommitted refuses (a bullet
+        // still being typed is staged first, so it's kept too)
+        if ctx.input(|i| i.viewport().close_requested()) {
+            if self.editing.is_some() {
+                if let Some(Ok(mut d)) = self.data.take() {
+                    if let Some(id) = self.finish_edit(&mut d) {
+                        self.cursor_to(&d, &id);
+                    }
+                    self.data = Some(Ok(d));
+                }
+                self.persist_staged();
+            }
+            if !self.changes.ops.is_empty() {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                self.msg = Some(format!("not closing: {} uncommitted {} · :w to commit · :wq commit and quit · :q! quit and drop them", self.changes.ops.len(), plural(self.changes.ops.len(), "change")));
+            }
         }
         if let Some(rx) = &self.committing {
             if let Ok((out, ops)) = rx.try_recv() {
@@ -1691,6 +1707,10 @@ impl eframe::App for App {
         }
         // after keys, deferred jobs and a finished commit, before any quit
         self.persist_staged();
+        if std::env::var("M3M0_SHOTS").is_err() {
+            let typing = self.editing.as_ref().is_some_and(|e| e.created || e.buf != e.start);
+            self.inhibit.set(!self.changes.ops.is_empty() || typing);
+        }
         if !self.grading.is_empty() {
             let mut failed = 0;
             self.grading.retain(|rx| match rx.try_recv() {

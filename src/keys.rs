@@ -217,7 +217,7 @@ pub const HELP: &[Group] = &[
     Group {
         title: "commands (:)",
         keys: &[
-            (":q", "quit (refuses with staged changes)"),
+            (":q", "quit (refuses while anything is uncommitted, so does the window's ×; logout asks too)"),
             (":wq / :x", "commit, then quit"),
             (":q!", "quit and drop staged changes"),
             (":w  :w!  :log  :e!", "see commit"),

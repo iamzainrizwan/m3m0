@@ -32,6 +32,8 @@ pub struct Editing {
     pub list: Option<bool>,
     /// line-mode undo (`u`): text and caret before each change
     pub hist: Vec<(String, usize)>,
+    /// the text when editing started (changed = uncommitted work)
+    pub start: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -190,7 +192,7 @@ impl App {
         let buf = rich::line_to_text(&orig, &|r| d.kb.name(r), &mut side);
         let at = if at_end { buf.chars().count() } else { 0 };
         let orig_text = buf.clone();
-        self.editing = Some(Editing { id: id.to_owned(), buf, side, orig, fresh: true, created, ac: None, sel: (at, at), push: true, undo: None, slash: None, mode: LineMode::Insert, op: String::new(), list: None, hist: vec![(orig_text, at)] });
+        self.editing = Some(Editing { id: id.to_owned(), buf, side, orig, fresh: true, created, ac: None, sel: (at, at), push: true, undo: None, slash: None, mode: LineMode::Insert, op: String::new(), list: None, hist: vec![(orig_text.clone(), at)], start: orig_text });
         self.focus = Focus::Notes;
     }
 
@@ -781,7 +783,7 @@ impl App {
         Some((p, pos))
     }
 
-    fn cursor_to(&mut self, d: &Loaded, id: &str) {
+    pub(super) fn cursor_to(&mut self, d: &Loaded, id: &str) {
         if let Some(page) = &self.week {
             // unfold ancestors so the rem is visible
             let mut cur = id.to_owned();

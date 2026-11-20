@@ -65,6 +65,7 @@ table: `docs/bridge.md`. Review grades go the same way (`review` op).
 - `src/deck.rs` + `src/cards.rs`: Claude decks, pairing, links, cards view
 - `src/chat.rs`: `claude -p` chat panel
 - `src/review.rs`: due queue + grading through the bridge
+- `src/inhibit.rs`: GNOME logout inhibitor while anything is uncommitted
 - `src/boot.rs`, `src/icon.rs`, `src/theme.rs`, `src/config.rs`
 - `plugin/`: the RemNote plugin (TypeScript)
 - `scripts/preview.sh`: frames on the secondary monitor (XWayland)
