@@ -84,8 +84,7 @@ impl App {
     pub(super) fn finish_edit(&mut self, d: &mut Loaded) -> Option<String> {
         let e = self.editing.take()?;
         if e.created && e.buf.trim().is_empty() {
-            self.changes.undo(&mut d.kb); // drop the Create
-            self.changes.redo.clear();
+            self.changes.drop_last(&mut d.kb); // drop the Create
             return None;
         }
         let near = e.id.clone();
@@ -138,8 +137,7 @@ impl App {
             let Some((gp, ppos)) = Self::parent_pos(d, &p) else { return false };
             (gp, ppos + 1)
         };
-        self.changes.undo(&mut d.kb);
-        self.changes.redo.clear();
+        self.changes.drop_last(&mut d.kb);
         self.changes.apply(&mut d.kb, Op::Create { id: id.clone(), parent: to.0, pos: to.1, line });
         self.cursor_to(d, &id);
         true
@@ -397,8 +395,7 @@ impl App {
                 let rows = note_rows(&d.kb, &page, &self.folded);
                 let i = rows.iter().position(|r| r.0 == e.id).unwrap_or(0);
                 if e.created {
-                    self.changes.undo(&mut d.kb);
-                    self.changes.redo.clear();
+                    self.changes.drop_last(&mut d.kb);
                 } else if d.kb.children(Some(&e.id)).is_empty() {
                     self.delete(d, &e.id);
                 } else {

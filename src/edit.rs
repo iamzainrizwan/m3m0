@@ -66,7 +66,12 @@ pub fn kind_from(s: &str) -> Kind {
 pub struct Changes {
     pub ops: Vec<Op>,
     pub redo: Vec<Op>,
-    next_tmp: u64,
+    pub next_tmp: u64,
+    /// undo steps: how many ops each `u` takes back (a group is one step)
+    steps: Vec<usize>,
+    redo_steps: Vec<usize>,
+    group: usize,
+    group_fresh: bool,
 }
 
 impl Changes {
@@ -75,26 +80,122 @@ impl Changes {
         format!("tmp-{}", self.next_tmp)
     }
 
+    /// Ops applied until the matching `end` undo / redo as one step.
+    pub fn begin(&mut self) {
+        if self.group == 0 {
+            self.group_fresh = true;
+        }
+        self.group += 1;
+    }
+
+    pub fn end(&mut self) {
+        self.group = self.group.saturating_sub(1);
+    }
+
     pub fn apply(&mut self, kb: &mut Kb, op: Op) {
         apply(kb, &op);
         self.ops.push(op);
+        self.clear_redo();
+        if self.group > 0 && !self.group_fresh && !self.steps.is_empty() {
+            *self.steps.last_mut().unwrap() += 1;
+        } else {
+            self.steps.push(1);
+            self.group_fresh = false;
+        }
+    }
+
+    pub fn clear_redo(&mut self) {
         self.redo.clear();
+        self.redo_steps.clear();
+    }
+
+    /// Take back exactly the last op, leaving no redo (a blank bullet dropped,
+    /// a fresh bullet re-staged elsewhere).
+    pub fn drop_last(&mut self, kb: &mut Kb) {
+        let Some(op) = self.ops.pop() else { return };
+        apply(kb, &inverse(&op));
+        if let Some(n) = self.steps.last_mut() {
+            *n -= 1;
+            if *n == 0 {
+                self.steps.pop();
+            }
+        }
+        self.clear_redo();
+    }
+
+    /// After ops were replaced from outside (commit, restore): one step each.
+    pub fn reset_steps(&mut self) {
+        self.steps = vec![1; self.ops.len()];
+        self.clear_redo();
     }
 
     pub fn undo(&mut self, kb: &mut Kb) -> Option<String> {
-        let op = self.ops.pop()?;
-        apply(kb, &inverse(&op));
-        let focus = focus_of(&op);
-        self.redo.push(op);
+        let n = self.steps.pop().unwrap_or(1).min(self.ops.len());
+        if n == 0 {
+            return None;
+        }
+        let mut focus = None;
+        for _ in 0..n {
+            let op = self.ops.pop()?;
+            apply(kb, &inverse(&op));
+            focus = focus_of(&op);
+            self.redo.push(op);
+        }
+        self.redo_steps.push(n);
         focus
     }
 
     pub fn redo(&mut self, kb: &mut Kb) -> Option<String> {
-        let op = self.redo.pop()?;
-        apply(kb, &op);
-        let focus = focus_of(&op);
-        self.ops.push(op);
+        let n = self.redo_steps.pop().unwrap_or(1).min(self.redo.len());
+        if n == 0 {
+            return None;
+        }
+        let mut focus = None;
+        for _ in 0..n {
+            let op = self.redo.pop()?;
+            apply(kb, &op);
+            focus = focus.or_else(|| focus_of(&op));
+            self.ops.push(op);
+        }
+        self.steps.push(n);
         focus
+    }
+}
+
+/// Staged ops saved to disk after every change, so a crash or a forced quit
+/// doesn't lose them; restored on the next start against the same database.
+#[derive(Serialize, Deserialize)]
+pub struct Staged {
+    pub db: std::path::PathBuf,
+    pub next_tmp: u64,
+    pub ops: Vec<Op>,
+}
+
+pub fn staged_path() -> std::path::PathBuf {
+    crate::kb::home().join(".local/state/m3m0/staged.json")
+}
+
+impl Staged {
+    pub fn save(&self) {
+        let p = staged_path();
+        if self.ops.is_empty() {
+            let _ = std::fs::remove_file(p);
+            return;
+        }
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        if let Ok(s) = serde_json::to_string(self) {
+            // write then rename: a crash mid-write never leaves half a file
+            let tmp = p.with_extension("json.tmp");
+            if std::fs::write(&tmp, s).is_ok() {
+                let _ = std::fs::rename(tmp, p);
+            }
+        }
+    }
+
+    pub fn load() -> Option<Staged> {
+        serde_json::from_str(&std::fs::read_to_string(staged_path()).ok()?).ok()
     }
 }
 

@@ -199,6 +199,8 @@ struct App {
     replay_at: f64,
     last_search: Option<String>,
     links: std::collections::HashMap<String, String>,
+    /// staged ops as last written to disk (edit::Staged); None until restored
+    staged_disk: Option<String>,
 }
 
 fn load(db: Option<PathBuf>) -> Result<Loaded, String> {
@@ -330,6 +332,7 @@ impl App {
             replay_at: 0.0,
             last_search: None,
             links: deck::load_links(),
+            staged_disk: None,
         }
     }
 
@@ -1133,6 +1136,7 @@ impl App {
     fn stage_revert(&mut self, ops: &[edit::Op]) {
         let Some(Ok(d)) = &mut self.data else { return };
         let mut n = 0;
+        self.changes.begin();
         for op in ops.iter().rev() {
             let inv = match op {
                 // undoing a create = deleting it now, with a snapshot so undo works
@@ -1146,6 +1150,7 @@ impl App {
             self.changes.apply(&mut d.kb, inv);
             n += 1;
         }
+        self.changes.end();
         self.msg = Some(format!("staged {n} ops reverting that commit: :w to review and commit"));
     }
 
@@ -1205,7 +1210,7 @@ impl App {
         }
         let rest: Vec<edit::Op> = self.changes.ops.drain(..).skip(out.done).map(|o| commit::rename_op(&o, m)).collect();
         self.changes.ops = rest;
-        self.changes.redo.clear();
+        self.changes.reset_steps();
         if let Some(Ok(d)) = &mut self.data {
             rename_ids(&mut d.kb, m);
         }
@@ -1225,6 +1230,35 @@ impl App {
             None => format!("committed {} changes to RemNote", out.done),
             Some(e) => format!("committed {} of {}; stopped: {e} (the rest stay staged)", out.done, ops.len()),
         });
+    }
+
+    /// Staged ops left from a crash or a killed session: re-apply them.
+    fn restore_staged(&mut self) {
+        if std::env::var("M3M0_SHOTS").is_ok() {
+            return;
+        }
+        let Some(Ok(d)) = &mut self.data else { return };
+        if let Some(st) = edit::Staged::load().filter(|st| st.db == d.db && !st.ops.is_empty() && self.changes.ops.is_empty()) {
+            let n = st.ops.len();
+            for op in st.ops {
+                self.changes.apply(&mut d.kb, op);
+            }
+            self.changes.reset_steps();
+            self.changes.next_tmp = self.changes.next_tmp.max(st.next_tmp);
+            self.msg = Some(format!("restored {n} staged {} from last time · :diff to look, :w to commit, :e! to drop", plural(n, "change")));
+        }
+        self.staged_disk = Some(String::new());
+    }
+
+    /// Write the staged ops to disk whenever they change (never in previews).
+    fn persist_staged(&mut self) {
+        let (Some(last), Some(Ok(d))) = (&self.staged_disk, &self.data) else { return };
+        let st = edit::Staged { db: d.db.clone(), next_tmp: self.changes.next_tmp, ops: self.changes.ops.clone() };
+        let Ok(now) = serde_json::to_string(&st.ops) else { return };
+        if &now != last {
+            st.save();
+            self.staged_disk = Some(now);
+        }
     }
 
     fn reload(&mut self, ctx: &egui::Context, db: Option<PathBuf>) {
@@ -1362,6 +1396,7 @@ impl eframe::App for App {
         if self.data.is_none() {
             if let Ok(d) = self.rx.try_recv() {
                 self.data = Some(d);
+                self.restore_staged();
                 self.preselect();
             }
         }
@@ -1474,6 +1509,7 @@ impl eframe::App for App {
                 }
             }
         }
+        self.persist_staged();
         // don't lose staged edits: closing with changes staged asks first
         if ctx.input(|i| i.viewport().close_requested()) && !self.changes.ops.is_empty() {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
