@@ -107,9 +107,14 @@ fn pieces(ui: &egui::Ui, kb: &Kb, math: &mut Math, sp: &[Span], st: &Style, out:
 
 /// Draw `line`. Returns the rects of [[refs]] (for clicks).
 pub fn line(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, l: &Line, st: &Style) -> Vec<(Rect, String)> {
+    line_base(ui, kb, math, l, st).0
+}
+
+/// `line`, plus the screen y of its first row's baseline (gutter numbers sit on it).
+pub fn line_base(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, l: &Line, st: &Style) -> (Vec<(Rect, String)>, Option<f32>) {
     if l.kind == Kind::Code {
         code_block(ui, kb, l, st);
-        return vec![];
+        return (vec![], None);
     }
     let mut ps: Vec<Piece> = vec![];
     pieces(ui, kb, math, &l.front, st, &mut ps);
@@ -124,7 +129,7 @@ pub fn line(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, l: &Line, st: &Style) -
     };
     if let Some(m) = marker {
         ps.push(text_piece(ui, RichText::new(format!(" {m} ")).size(st.size).color(RED), None));
-        let back = Style { size: st.size, color: FG_DIM.lerp_to_gamma(FG, 0.6), bold: false, bullet: None };
+        let back = Style { size: st.size, color: st.color, bold: false, bullet: None };
         pieces(ui, kb, math, &l.back, &back, &mut ps);
     }
     if ps.is_empty() {
@@ -174,6 +179,7 @@ pub fn line(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, l: &Line, st: &Style) -
     let (rect, _) = ui.allocate_exact_size(Vec2::new(indent + width, total), Sense::hover());
     let p = ui.painter();
     let mut refs = vec![];
+    let first_base = rect.top() + metrics[0].0;
     let mut y = rect.top();
     for (ri, r) in rows.iter().enumerate() {
         let (asc, desc) = metrics[ri];
@@ -206,7 +212,7 @@ pub fn line(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, l: &Line, st: &Style) -
         }
         y += asc + desc + gap;
     }
-    refs
+    (refs, Some(first_base))
 }
 
 fn code_block(ui: &mut egui::Ui, kb: &Kb, l: &Line, st: &Style) {
@@ -230,7 +236,7 @@ fn code_block(ui: &mut egui::Ui, kb: &Kb, l: &Line, st: &Style) {
                 ui.spacing_mut().item_spacing = Vec2::ZERO;
                 ui.label(RichText::new(">> ").size(st.size).color(RED));
                 let plain: String = crate::rich::plain(&l.back, &|id| kb.name(id));
-                ui.label(RichText::new(plain).size(st.size).color(FG_DIM.lerp_to_gamma(FG, 0.6)));
+                ui.label(RichText::new(plain).size(st.size).color(st.color));
             });
         }
     });

@@ -61,6 +61,10 @@ pub enum Repeat {
 }
 
 impl Editing {
+    /// anything here that isn't staged yet: a new bullet, or text changed since editing began
+    pub fn unsaved(&self) -> bool {
+        self.created || self.buf != self.start
+    }
     fn buf(&self) -> typing::Buf {
         typing::Buf { text: self.buf.clone(), anchor: self.sel.0, caret: self.sel.1 }
     }
@@ -1416,4 +1420,21 @@ fn complete(kb: &Kb, q: &str, near: &str) -> Vec<(String, String)> {
     hits.sort();
     hits.dedup_by(|a, b| a.3 == b.3);
     hits.into_iter().take(8).map(|h| (h.4, h.3)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ed(buf: &str, start: &str, created: bool) -> Editing {
+        let orig = rich::Line { kind: rich::Kind::Plain, front: vec![], back: vec![] };
+        Editing { id: "x".into(), buf: buf.into(), side: rich::Side::default(), orig, fresh: false, created, ac: None, sel: (0, 0), push: false, undo: None, slash: None, mode: LineMode::Insert, op: String::new(), list: None, hist: vec![], start: start.into() }
+    }
+
+    #[test]
+    fn unsaved_typing_holds_the_logout_lock() {
+        assert!(!ed("same", "same", false).unsaved());
+        assert!(ed("same!", "same", false).unsaved());
+        assert!(ed("", "", true).unsaved()); // fresh o bullet, nothing typed yet
+    }
 }

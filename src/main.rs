@@ -1493,7 +1493,7 @@ impl App {
                 None => self.msg = Some(format!("scroll speed {} (:scroll 1.5 to change)", self.cfg.scroll)),
                 _ => self.msg = Some("scroll: give a number like 1.5".into()),
             },
-            (Some("rnu" | "relnum" | "nu"), _) => {
+            (Some("rnu" | "relnum"), _) => {
                 self.cfg.relnum = !self.cfg.relnum;
                 self.msg = Some(format!("relative numbers {}", if self.cfg.relnum { "on" } else { "off" }));
             }
@@ -1708,7 +1708,7 @@ impl eframe::App for App {
         // after keys, deferred jobs and a finished commit, before any quit
         self.persist_staged();
         if std::env::var("M3M0_SHOTS").is_err() {
-            let typing = self.editing.as_ref().is_some_and(|e| e.created || e.buf != e.start);
+            let typing = self.editing.as_ref().is_some_and(|e| e.unsaved());
             self.inhibit.set(!self.changes.ops.is_empty() || typing);
         }
         if !self.grading.is_empty() {
@@ -2264,6 +2264,7 @@ impl App {
                             ui.label(RichText::new(d.kb.name(&w)).size(24.0).color(FG_BRIGHT).family(bold()));
                             ui.add_space(14.0);
                             let mut rects: Vec<Rect> = Vec::with_capacity(rows.len());
+                            let mut bases: Vec<Option<f32>> = Vec::with_capacity(rows.len());
                             for (i, (id, depth)) in rows.iter().enumerate() {
                                 let sel = i == self.note_cur;
                                 let kids = !d.kb.children(Some(id)).is_empty();
@@ -2274,6 +2275,7 @@ impl App {
                                 }
                                 let math = &mut self.math;
                                 let mut refs = vec![];
+                                let mut base = None;
                                 let marked = vis.is_some_and(|(a, b)| i >= a && i <= b);
                                 let resp = row_ext(ui, ("n", id), sel, focused, *depth as f32 * 22.0, marked, |ui| {
                                     if let Some(e) = editing.as_mut().filter(|e| &e.id == id) {
@@ -2288,7 +2290,7 @@ impl App {
                                     match heading {
                                         Some(h) => {
                                             let st = render::Style { size: HEADINGS[h.min(4) as usize], color: FG_BRIGHT, bold: true, bullet: None };
-                                            refs = render::line(ui, &d.kb, math, &line, &st);
+                                            (refs, base) = render::line_base(ui, &d.kb, math, &line, &st);
                                             if folded {
                                                 ui.label(RichText::new(" …").color(RED).size(NOTE_TEXT));
                                             }
@@ -2301,8 +2303,8 @@ impl App {
                                             };
                                             // ordered >>> card items show their number
                                             let b = if d.kb.is_list_item(id) { list_number(&d.kb, id).unwrap_or(b) } else { b };
-                                            let st = render::Style { size: NOTE_TEXT, color: FG, bold: false, bullet: Some((b, c)) };
-                                            refs = render::line(ui, &d.kb, math, &line, &st);
+                                            let st = render::Style { size: NOTE_TEXT, color: FG_BRIGHT, bold: false, bullet: Some((b, c)) };
+                                            (refs, base) = render::line_base(ui, &d.kb, math, &line, &st);
                                         }
                                     }
                                 });
@@ -2313,6 +2315,7 @@ impl App {
                                     }
                                 }
                                 rects.push(resp.rect);
+                                bases.push(base);
                                 if sel && self.scroll_notes {
                                     resp.scroll_to_me(None);
                                 }
@@ -2328,7 +2331,7 @@ impl App {
                             }
                             indent_guides(ui, &rows, &rects, self.note_cur);
                             if self.cfg.relnum {
-                                gutter_numbers(ui, &rects, self.note_cur, focused);
+                                gutter_numbers(ui, &rects, &bases, self.note_cur, focused);
                             }
                             ui.add_space(ui.ctx().screen_rect().height() * 0.4);
                         });
@@ -2411,8 +2414,9 @@ impl App {
         }
         let screen = ctx.screen_rect();
         // hug the content: key column as wide as the longest key
-        let kw = items.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(1) as f32 * 13.0 * 0.6 + 14.0;
-        let dw = items.iter().map(|(_, w)| w.chars().count()).max().unwrap_or(1) as f32 * 13.0 * 0.6;
+        let measure = |t: &str| ctx.fonts(|g| g.layout_no_wrap(t.to_owned(), FontId::proportional(13.0), FG).size().x);
+        let kw = items.iter().map(|(k, _)| measure(k)).fold(0.0, f32::max) + 14.0;
+        let dw = items.iter().map(|(_, w)| measure(w)).fold(0.0, f32::max);
         let width = (kw + dw + 12.0).max(120.0);
         let at = Pos2::new(screen.right() - width - 32.0, screen.bottom() - STATUS_H - 12.0);
         egui::Area::new(egui::Id::new("which")).order(egui::Order::Foreground).pivot(Align2::LEFT_BOTTOM).fixed_pos(at).show(ctx, |ui| {
@@ -2474,6 +2478,12 @@ impl App {
                         x += t.2 + 4.0;
                         rows.last_mut().unwrap().push(t);
                     }
+                    // same row count, but even: 8+7 instead of 11+4 (if every row still fits)
+                    let per = tabs.len().div_ceil(rows.len());
+                    let even: Vec<Vec<_>> = tabs.chunks(per).map(|c| c.iter().collect()).collect();
+                    if even.iter().all(|r: &Vec<&(usize, String, f32)>| r.iter().map(|t| t.2 + 4.0).sum::<f32>() <= avail + 4.0) {
+                        rows = even;
+                    }
                     ui.spacing_mut().item_spacing.y = 4.0;
                     for r in rows {
                         ui.horizontal(|ui| {
@@ -2490,8 +2500,8 @@ impl App {
                     ui.label(RichText::new(g.title).color(RED_BRIGHT).family(bold()).size(17.0));
                     ui.add_space(8.0);
                     // key column as wide as this section's longest key
-                    let longest = g.keys.iter().map(|(k, _)| k.chars().count()).max().unwrap_or(8) as f32;
-                    let keyw = (longest * 15.0 * 0.6 + 28.0).clamp(110.0, 300.0);
+                    let longest = g.keys.iter().map(|(k, _)| ui.fonts(|f| f.layout_no_wrap(k.to_string(), FontId::proportional(15.0), FG).size().x)).fold(0.0, f32::max);
+                    let keyw = (longest + 28.0).clamp(110.0, 300.0);
                     egui::ScrollArea::vertical().max_height(size.y - 170.0).vertical_scroll_offset(scroll as f32 * 30.0).show(ui, |ui| {
                         for (k, what) in g.keys {
                             ui.horizontal_top(|ui| {
@@ -2765,13 +2775,21 @@ fn indent_guides(ui: &egui::Ui, rows: &[(String, usize)], rects: &[Rect], cur: u
 
 /// vim-style relative numbers left of each bullet: distance from the cursor
 /// (what a count like 5j needs), the cursor row's own number in red.
-fn gutter_numbers(ui: &egui::Ui, rects: &[Rect], cur: usize, focused: bool) {
+fn gutter_numbers(ui: &egui::Ui, rects: &[Rect], bases: &[Option<f32>], cur: usize, focused: bool) {
     let f = FontId::monospace(11.5);
     let line_h = ui.fonts(|g| g.row_height(&FontId::proportional(NOTE_TEXT)));
     let p = ui.painter();
+    let clip = ui.clip_rect();
     for (i, r) in rects.iter().enumerate() {
+        if !clip.intersects(*r) {
+            continue;
+        }
         let (t, col) = if i == cur { ((i + 1).to_string(), if focused { RED_BRIGHT } else { FG_DIM }) } else { (i.abs_diff(cur).to_string(), GREY1) };
-        p.text(Pos2::new(r.left() - 8.0, r.top() + 3.0 + line_h / 2.0), Align2::RIGHT_CENTER, t, f.clone(), col);
+        let g = ui.fonts(|fo| fo.layout_no_wrap(t, f.clone(), col));
+        let asc = g.rows.first().and_then(|r| r.glyphs.first()).map_or(g.size().y * 0.8, |gl| gl.pos.y);
+        // on the bullet's baseline, so tall maths rows don't leave the number floating above the text
+        let base = bases.get(i).copied().flatten().unwrap_or(r.top() + 3.0 + line_h * 0.75);
+        p.galley(Pos2::new(r.left() - 8.0 - g.size().x, base - asc), g, col);
     }
 }
 
@@ -3218,7 +3236,7 @@ fn answer(ui: &mut egui::Ui, kb: &Kb, math: &mut math::Math, text: &str) {
         let spans = rich::inline(body, &|_| None, &rich::Side::default(), &mut || "c".into());
         let l = rich::Line { kind: rich::Kind::Plain, front: spans, back: vec![] };
         ui.horizontal_top(|ui| {
-            render::line(ui, kb, math, &l, &render::Style { size, color: FG, bold, bullet });
+            render::line(ui, kb, math, &l, &render::Style { size, color: FG_BRIGHT, bold, bullet });
         });
     }
     if let Some(c) = code {

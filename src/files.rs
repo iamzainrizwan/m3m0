@@ -349,7 +349,7 @@ pub fn markdown(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, src: &str) -> Vec<(
             match bullet {
                 Some(b) if has_link => {
                     let l = rich::Line { kind: rich::Kind::Plain, front: md_spans(b), back: vec![] };
-                    let r = crate::render::line(ui, kb, math, &l, &crate::render::Style { size: NOTE_TEXT - 1.0, color: FG, bold: false, bullet: Some(("•", if depth == 0 { RED } else { COMMENT })) });
+                    let r = crate::render::line(ui, kb, math, &l, &crate::render::Style { size: NOTE_TEXT - 1.0, color: FG_BRIGHT, bold: false, bullet: Some(("•", if depth == 0 { RED } else { COMMENT })) });
                     keep(r, &mut links);
                 }
                 // deck syntax bullets (Claude's decks) show their card markers
@@ -359,11 +359,11 @@ pub fn markdown(ui: &mut egui::Ui, kb: &Kb, math: &mut Math, src: &str) -> Vec<(
                     if bold {
                         l = rich::Line { kind: rich::Kind::Plain, front: rich::inline(b.trim().trim_matches('*'), &|_| None, &rich::Side::default(), &mut || "c".into()), back: vec![] };
                     }
-                    crate::render::line(ui, kb, math, &l, &crate::render::Style { size: NOTE_TEXT - 1.0, color: FG, bold, bullet: Some(("•", if depth == 0 { RED } else { COMMENT })) });
+                    crate::render::line(ui, kb, math, &l, &crate::render::Style { size: NOTE_TEXT - 1.0, color: FG_BRIGHT, bold, bullet: Some(("•", if depth == 0 { RED } else { COMMENT })) });
                 }
                 None if has_link => {
                     let l = rich::Line { kind: rich::Kind::Plain, front: md_spans(t), back: vec![] };
-                    let r = crate::render::line(ui, kb, math, &l, &crate::render::Style { size: NOTE_TEXT - 1.0, color: FG, bold: false, bullet: None });
+                    let r = crate::render::line(ui, kb, math, &l, &crate::render::Style { size: NOTE_TEXT - 1.0, color: FG_BRIGHT, bold: false, bullet: None });
                     keep(r, &mut links);
                 }
                 None => tex_line(ui, kb, math, t, NOTE_TEXT - 1.0, FG, false, None),

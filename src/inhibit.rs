@@ -20,7 +20,7 @@ impl Inhibit {
         }
         match (on, self.child.is_some()) {
             (true, false) => {
-                let watch = format!("while kill -0 {} 2>/dev/null; do sleep 2; done", std::process::id());
+                let watch = format!("while kill -0 {} 2>/dev/null && kill -0 $PPID 2>/dev/null; do sleep 2; done", std::process::id());
                 // absolute paths: launched from the app grid there's no shell PATH
                 self.child = Command::new("/usr/bin/gnome-session-inhibit")
                     .args(["--app-id", "m3m0", "--reason", "uncommitted notes in m3m0 (:w to commit)", "--inhibit", "logout", "/bin/sh", "-c", &watch])

@@ -160,11 +160,11 @@ impl App {
                     ui.painter().rect_filled(sep, 0.0, GREY1);
                     ui.add_space(18.0);
                     if r.revealed {
-                        render::line(ui, &d.kb, math, &a, &render::Style { size: NOTE_TEXT + 2.0, color: FG, bold: false, bullet: None });
+                        render::line(ui, &d.kb, math, &a, &render::Style { size: NOTE_TEXT + 2.0, color: FG_BRIGHT, bold: false, bullet: None });
                         if l.kind == Kind::MultiLine && it.dir == "f" {
                             for c in d.kb.children(Some(&it.rem)) {
                                 let cl = d.kb.line_of(c);
-                                render::line(ui, &d.kb, math, &cl, &render::Style { size: NOTE_TEXT + 1.0, color: FG, bold: false, bullet: Some(("•", RED)) });
+                                render::line(ui, &d.kb, math, &cl, &render::Style { size: NOTE_TEXT + 1.0, color: FG_BRIGHT, bold: false, bullet: Some(("•", RED)) });
                             }
                         }
                         ui.add_space(24.0);
